@@ -13,7 +13,9 @@ from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barc
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
 from temperature_scaling import ModelWithTemperature
 from torch.utils.data import DataLoader
-
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from dataset import TestDataset
 seed = 42
 
 # general reproducibility
@@ -79,9 +81,20 @@ def main():
     model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
-    #valid_loader = DataLoader(#need the dataset here, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
-    #scaled_model = ModelWithTemperature(model)
-    #scaled_model.set_temperature(valid_loader)    
+    input_transform = transforms.Compose([
+    transforms.ToTensor(),          
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    target_transform = transforms.Compose([
+    transforms.ToTensor(),                    
+    ])
+    
+    valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
+        num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+  
+    scaled_model = ModelWithTemperature(model)
+    scaled_model.set_temperature(valid_loader)
 
     model.eval()
     
