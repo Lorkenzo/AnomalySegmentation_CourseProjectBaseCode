@@ -29,6 +29,9 @@ NUM_CLASSES = 20
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+def transform_label(label):
+        return torch.squeeze(label, 0).long()   
+     
 def main():
     parser = ArgumentParser()
     parser.add_argument(
@@ -43,7 +46,7 @@ def main():
     parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
-    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
@@ -87,7 +90,8 @@ def main():
     ])
 
     target_transform = transforms.Compose([
-    transforms.ToTensor(),                    
+    transforms.ToTensor(),  
+    transform_label              
     ])
     
     valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
