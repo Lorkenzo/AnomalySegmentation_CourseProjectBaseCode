@@ -49,7 +49,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--temp',type=int, default=None)
+    parser.add_argument('--temp',type=float, default=None)
     args = parser.parse_args()
     anomaly_score_list = []
     ood_gts_list = []
