@@ -49,6 +49,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--temp',type=int, default=None)
     args = parser.parse_args()
     anomaly_score_list = []
     ood_gts_list = []
@@ -84,21 +85,24 @@ def main():
     model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
-    input_transform = transforms.Compose([
-    transforms.ToTensor(),          
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    if args.temp != None:
+        input_transform = transforms.Compose([
+        transforms.Resize((512, 1024)), 
+        transforms.ToTensor(),          
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
-    target_transform = transforms.Compose([
-    transforms.ToTensor(),  
-    transform_label              
-    ])
+        target_transform = transforms.Compose([
+        transforms.Resize((512, 1024)), 
+        transforms.ToTensor(),  
+        transform_label              
+        ])
+        
+        valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
+            num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
     
-    valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
-        num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
-  
-    scaled_model = ModelWithTemperature(model)
-    scaled_model.set_temperature(valid_loader)
+        model = ModelWithTemperature(model,args.temp)
+        model.set_temperature(valid_loader)
 
     model.eval()
     
