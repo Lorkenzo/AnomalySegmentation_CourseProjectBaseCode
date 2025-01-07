@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os
-import cv2
+#import cv2
 import glob
 import torch
 import random
