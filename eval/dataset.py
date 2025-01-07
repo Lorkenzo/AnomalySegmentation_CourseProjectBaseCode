@@ -27,6 +27,9 @@ def image_path(root, basename, extension):
 def image_path_city(root, name):
     return os.path.join(root, f'{name}')
 
+def image_path_test(root, name):
+    return os.path.join(root, f'{name}')
+
 def image_basename(filename):
     return os.path.basename(os.path.splitext(filename)[0])
 
@@ -98,4 +101,46 @@ class cityscapes(Dataset):
 
     def __len__(self):
         return len(self.filenames)
+
+
+class TestDataset(Dataset):
+    def __init__(self, root, input_transform=None, target_transform=None):
+
+        self.images_paths = []
+        self.labels_paths = []
+
+        images_folder = os.path.join(root, "images")
+        labels_folder = os.path.join(root, "labels_masks")
+
+        # Load all images and mask_labels paths
+        
+        for image_name in os.listdir(images_folder):
+            self.images_paths.append(image_path_test(images_folder, image_name))
+
+        for label_name in os.listdir(labels_folder):
+            self.labels_paths.append(image_path_test(labels_folder, label_name))
+
+        self.input_transform = input_transform
+        self.target_transform = target_transform
+
+    def __getitem__(self, idx):
+        # Load image and mask label
+        image_path = self.images_paths[idx]
+        label_path = self.labels_paths[idx]
+
+        with open(image_path, 'rb') as f:
+            image = load_image(f).convert('RGB')
+        with open(label_path, 'rb') as f:
+            label = load_image(f).convert('L')
+
+        # Apply transformations
+        if self.input_transform is not None:
+            image = self.input_transform(image)
+        if self.target_transform is not None:
+            label = self.target_transform(label)
+
+        return image, label
+    
+    def __len__(self):
+        return len(self.images_paths)
 

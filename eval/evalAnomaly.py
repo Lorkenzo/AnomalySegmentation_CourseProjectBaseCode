@@ -11,7 +11,11 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
-
+from temperature_scaling import ModelWithTemperature
+from torch.utils.data import DataLoader
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from dataset import TestDataset
 seed = 42
 
 # general reproducibility
@@ -25,6 +29,9 @@ NUM_CLASSES = 20
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+def transform_label(label):
+        return torch.squeeze(label, 0).long()   
+     
 def main():
     parser = ArgumentParser()
     parser.add_argument(
@@ -34,14 +41,15 @@ def main():
         help="A list of space separated input images; "
         "or a single glob pattern such as 'directory/*.jpg'",
     )  
-    parser.add_argument('--loadDir',default="../trained_models/")
+    parser.add_argument('--loadDir',default="trained_models/")
     parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
-    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--temp',type=float, default=None)
     args = parser.parse_args()
     anomaly_score_list = []
     ood_gts_list = []
@@ -76,6 +84,26 @@ def main():
 
     model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
+
+    if args.temp != None:
+        input_transform = transforms.Compose([
+        transforms.Resize((512, 1024)), 
+        transforms.ToTensor(),          
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        target_transform = transforms.Compose([
+        transforms.Resize((512, 1024)), 
+        transforms.ToTensor(),  
+        transform_label              
+        ])
+        
+        valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
+            num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    
+        model = ModelWithTemperature(model,args.temp)
+        model.set_temperature(valid_loader)
+
     model.eval()
     
     for path in glob.glob(os.path.expanduser(str(args.input[0]))):
