@@ -38,6 +38,7 @@ def remove_module_prefix(state_dict):
 
 
 def load_model(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ERFNet(NUM_CLASSES)
     modelpath = args.loadDir + args.loadModel
     weightspath = args.loadDir + args.loadWeights
@@ -50,7 +51,7 @@ def load_model(args):
     model.load_state_dict(state_dict, strict=False)
 
     if not args.cpu:
-        model = torch.nn.DataParallel(model).cuda()
+        model = torch.nn.DataParallel(model).to(device)
 
     model.eval()
     print("Model loaded successfully.")
@@ -70,17 +71,17 @@ def get_entropy(output):
     return entropy
 
 
-def evaluate_ood(model, dataloader, method='max_logit'):
+def evaluate_ood(model, dataloader, path, method='max_logit'):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     anomaly_score_list = []
     ood_gts_list = []
 
     for images, labels in dataloader:
-        images = images.cuda()
-        labels = labels.numpy()
-
+        images = images.to(device)
+        labels = labels
         with torch.no_grad():
             output = model(images)
-
         if method == 'max_logit':
             anomaly_scores = 1 - get_max_logit(output).cpu().numpy()
         elif method == 'max_entropy':
@@ -88,18 +89,31 @@ def evaluate_ood(model, dataloader, method='max_logit'):
         else:
             raise ValueError("Invalid method. Choose 'max_logit' or 'max_entropy'.")
 
-        anomaly_score_list.append(anomaly_scores)
-        ood_gts_list.append(labels)
+        ood_gts = np.array(labels)
 
-    ood_gts_list = np.array(ood_gts_list).flatten()
+        if "RoadAnomaly" in path:
+            ood_gts = np.where((ood_gts==2), 1, ood_gts)
+        if "LostAndFound" in path:
+            ood_gts = np.where((ood_gts==0), 255, ood_gts)
+            ood_gts = np.where((ood_gts==1), 0, ood_gts)
+            ood_gts = np.where((ood_gts>1)&(ood_gts<201), 1, ood_gts)
 
-    # Controllo della presenza di campioni OOD
-    unique_labels = np.unique(ood_gts_list)
-    print(f"Etichette uniche nei dati: {unique_labels}")
+        if "Streethazard" in path:
+            ood_gts = np.where((ood_gts==14), 255, ood_gts)
+            ood_gts = np.where((ood_gts<20), 0, ood_gts)
+            ood_gts = np.where((ood_gts==255), 1, ood_gts)
 
-    if 1 not in unique_labels:
-        print("Attenzione: Nessun campione OOD (anomalo) trovato nel dataset!")
-        print("Le metriche potrebbero non essere calcolate correttamente.")
+        if 1 not in np.unique(ood_gts):
+            continue              
+        else:
+            ood_gts_list.append(ood_gts)
+            anomaly_score_list.append(anomaly_scores)
+
+        del output, anomaly_scores, ood_gts
+        torch.cuda.empty_cache()
+
+    ood_gts = np.array(ood_gts_list)
+    anomaly_scores = np.array(anomaly_score_list)
 
     return np.array(anomaly_score_list), np.array(ood_gts_list)
 
@@ -134,13 +148,13 @@ def main():
     model = load_model(args)
 
     input_transform = transforms.Compose([
-        transforms.Resize((512, 1024)),
+        transforms.Resize((720, 1280)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
     target_transform = transforms.Compose([
-        transforms.Resize((512, 1024)),
+        transforms.Resize((720, 1280)),
         transforms.ToTensor(),
         transform_label
     ])
@@ -151,12 +165,12 @@ def main():
     )
 
     print("Evaluating Max-Logit...")
-    logit_scores, logit_gts = evaluate_ood(model, dataloader, method='max_logit')
+    logit_scores, logit_gts = evaluate_ood(model, dataloader, args.input[0].split("images")[0],  method='max_logit')
     logit_auprc, logit_fpr = calculate_metrics(logit_scores, logit_gts)
     print(f"Max-Logit AUPRC: {logit_auprc * 100:.2f} | FPR@95: {logit_fpr * 100:.2f}")
 
     print("Evaluating Max-Entropy...")
-    entropy_scores, entropy_gts = evaluate_ood(model, dataloader, method='max_entropy')
+    entropy_scores, entropy_gts = evaluate_ood(model, dataloader, args.input[0].split("images")[0], method='max_entropy')
     entropy_auprc, entropy_fpr = calculate_metrics(entropy_scores, entropy_gts)
     print(f"Max-Entropy AUPRC: {entropy_auprc * 100:.2f} | FPR@95: {entropy_fpr * 100:.2f}")
 
