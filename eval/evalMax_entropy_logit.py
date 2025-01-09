@@ -60,26 +60,25 @@ def load_model(args):
 
 def get_max_logit(output):
     # Calcolo max-logit: Differenza tra la logit più alta e la seconda più alta
-    top2 = torch.topk(output, 2, dim=1)
-    return top2.values[:, 0, :, :] - top2.values[:, 1, :, :]
+    top2 = torch.topk(output.squeeze(0), 2, dim=0)
+    return top2.values[0, :, :] - top2.values[1, :, :]
 
 
 def get_entropy(output):
     # Calcolo entropia massima
-    probabilities = torch.nn.functional.softmax(output, dim=1)
-    entropy = -torch.sum(probabilities * torch.log(probabilities + 1e-10), dim=1)
+    probabilities = torch.nn.functional.softmax(output.squeeze(0), dim=0)
+    entropy = -torch.sum(probabilities * torch.log(probabilities + 1e-10), dim=0)
     return entropy
 
 
-def evaluate_ood(model, dataloader, path, method='max_logit'):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+def evaluate_ood(model, path, method='max_logit'):
     anomaly_score_list = []
     ood_gts_list = []
 
-    for images, labels in dataloader:
-        images = images.to(device)
-        labels = labels
+    for path in glob.glob(os.path.expanduser(str(path))):
+        print(path)
+        images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
+        images = images.permute(0,3,1,2)
         with torch.no_grad():
             output = model(images)
         if method == 'max_logit':
@@ -89,7 +88,16 @@ def evaluate_ood(model, dataloader, path, method='max_logit'):
         else:
             raise ValueError("Invalid method. Choose 'max_logit' or 'max_entropy'.")
 
-        ood_gts = np.array(labels)
+        pathGT = path.replace("images", "labels_masks")                
+        if "RoadObsticle21" in pathGT:
+           pathGT = pathGT.replace("webp", "png")
+        if "fs_static" in pathGT:
+           pathGT = pathGT.replace("jpg", "png")                
+        if "RoadAnomaly" in pathGT:
+           pathGT = pathGT.replace("jpg", "png")  
+
+        mask = Image.open(pathGT)
+        ood_gts = np.array(mask)
 
         if "RoadAnomaly" in path:
             ood_gts = np.where((ood_gts==2), 1, ood_gts)
@@ -114,8 +122,7 @@ def evaluate_ood(model, dataloader, path, method='max_logit'):
 
     ood_gts = np.array(ood_gts_list)
     anomaly_scores = np.array(anomaly_score_list)
-
-    return np.array(anomaly_score_list), np.array(ood_gts_list)
+    return anomaly_scores, ood_gts
 
 
 def calculate_metrics(anomaly_scores, ood_gts):
@@ -125,13 +132,16 @@ def calculate_metrics(anomaly_scores, ood_gts):
     ood_out = anomaly_scores[ood_mask]
     ind_out = anomaly_scores[ind_mask]
 
-    labels = np.concatenate([np.ones(len(ood_out)), np.zeros(len(ind_out))])
-    scores = np.concatenate([ood_out, ind_out])
+    ood_label = np.ones(len(ood_out))
+    ind_label = np.zeros(len(ind_out))
+    
+    val_out = np.concatenate((ind_out, ood_out))
+    val_label = np.concatenate((ind_label, ood_label))
 
-    auprc = average_precision_score(labels, scores)
-    fpr = fpr_at_95_tpr(scores, labels)
+    prc_auc = average_precision_score(val_label, val_out)
+    fpr = fpr_at_95_tpr(val_out, val_label)
 
-    return auprc, fpr
+    return prc_auc, fpr
 
 
 def main():
@@ -147,30 +157,13 @@ def main():
 
     model = load_model(args)
 
-    input_transform = transforms.Compose([
-        transforms.Resize((720, 1280)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
-
-    target_transform = transforms.Compose([
-        transforms.Resize((720, 1280)),
-        transforms.ToTensor(),
-        transform_label
-    ])
-
-    dataloader = DataLoader(
-        TestDataset(args.input[0].split("images")[0], input_transform, target_transform),
-        num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False
-    )
-
     print("Evaluating Max-Logit...")
-    logit_scores, logit_gts = evaluate_ood(model, dataloader, args.input[0].split("images")[0],  method='max_logit')
+    logit_scores, logit_gts = evaluate_ood(model, args.input[0],  method='max_logit')
     logit_auprc, logit_fpr = calculate_metrics(logit_scores, logit_gts)
     print(f"Max-Logit AUPRC: {logit_auprc * 100:.2f} | FPR@95: {logit_fpr * 100:.2f}")
 
     print("Evaluating Max-Entropy...")
-    entropy_scores, entropy_gts = evaluate_ood(model, dataloader, args.input[0].split("images")[0], method='max_entropy')
+    entropy_scores, entropy_gts = evaluate_ood(model, args.input[0], method='max_entropy')
     entropy_auprc, entropy_fpr = calculate_metrics(entropy_scores, entropy_gts)
     print(f"Max-Entropy AUPRC: {entropy_auprc * 100:.2f} | FPR@95: {entropy_fpr * 100:.2f}")
 
