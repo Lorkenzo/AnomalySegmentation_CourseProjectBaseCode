@@ -82,7 +82,7 @@ def main():
                 own_state[name].copy_(param)
         return model
 
-    model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
+    model = load_my_state_dict(model, torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
     if args.temp != None:

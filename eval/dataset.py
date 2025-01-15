@@ -87,9 +87,9 @@ class cityscapes(Dataset):
 
         #print(filename)
 
-        with open(image_path_city(self.images_root, filename), 'rb') as f:
+        with open(filename, 'rb') as f:
             image = load_image(f).convert('RGB')
-        with open(image_path_city(self.labels_root, filenameGt), 'rb') as f:
+        with open(filenameGt, 'rb') as f:
             label = load_image(f).convert('P')
 
         if self.input_transform is not None:
@@ -122,6 +122,7 @@ class TestDataset(Dataset):
 
         self.input_transform = input_transform
         self.target_transform = target_transform
+
 
     def __getitem__(self, idx):
         # Load image and mask label

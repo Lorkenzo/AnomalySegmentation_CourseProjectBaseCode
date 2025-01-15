@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import os
 import importlib
 import time
+import cityscapesscripts as cs
+import torchvision.transforms as transforms
 
 from PIL import Image
 from argparse import ArgumentParser
@@ -20,6 +22,7 @@ from torchvision.transforms import ToTensor, ToPILImage
 
 from dataset import cityscapes
 from erfnet import ERFNet
+from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
 
@@ -37,6 +40,7 @@ target_transform_cityscapes = Compose([
     Relabel(255, 19),   #ignore label to 19
 ])
 
+
 def main(args):
 
     modelpath = args.loadDir + args.loadModel
@@ -51,6 +55,7 @@ def main(args):
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
 
+
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
         own_state = model.state_dict()
         for name, param in state_dict.items():
@@ -64,9 +69,24 @@ def main(args):
                 own_state[name].copy_(param)
         return model
 
-    model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
+    model = load_my_state_dict(model, torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
+    if args.temp != None:
+        input_transform = transforms.Compose([
+            transforms.Resize((128, 512)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        target_transform = transforms.Compose([
+            transforms.Resize((128, 512)),
+            transforms.ToTensor(),
+        ])
+        valid_loader = DataLoader(cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+
+        model = ModelWithTemperature(model, args.temp)
+        model.set_temperature(valid_loader)
 
     model.eval()
 
@@ -133,17 +153,19 @@ def main(args):
     print ("MEAN IoU: ", iouStr, "%")
 
 if __name__ == '__main__':
+
     parser = ArgumentParser()
 
     parser.add_argument('--state')
 
-    parser.add_argument('--loadDir',default="../trained_models/")
+    parser.add_argument('--loadDir',default="trained_models/")
     parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
-    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--num-workers', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
+    parser.add_argument('--temp', type=float, default=None)
 
     main(parser.parse_args())

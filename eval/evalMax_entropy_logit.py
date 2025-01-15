@@ -46,7 +46,7 @@ def load_model(args):
     print(f"Loading model: {modelpath}")
     print(f"Loading weights: {weightspath}")
 
-    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage)
+    state_dict = torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage)
     state_dict = remove_module_prefix(state_dict)
     model.load_state_dict(state_dict, strict=False)
 
@@ -112,7 +112,7 @@ def evaluate_ood(model, path, method='max_logit'):
             ood_gts = np.where((ood_gts==255), 1, ood_gts)
 
         if 1 not in np.unique(ood_gts):
-            continue              
+            continue
         else:
             ood_gts_list.append(ood_gts)
             anomaly_score_list.append(anomaly_scores)
