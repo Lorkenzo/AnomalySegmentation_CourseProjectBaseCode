@@ -17,7 +17,7 @@ from torchvision.transforms import Compose, CenterCrop, Normalize, Resize
 from torchvision.transforms import ToTensor, ToPILImage
 
 from dataset import cityscapes
-from erfnet import ERFNet
+from models.erfnet import ERFNet
 from transform import Relabel, ToLabel, Colorize
 
 import visdom

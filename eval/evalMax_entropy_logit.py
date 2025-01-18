@@ -4,7 +4,7 @@ import torch
 import random
 from PIL import Image
 import numpy as np
-from erfnet import ERFNet
+from models.erfnet import ERFNet
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr
 from sklearn.metrics import average_precision_score

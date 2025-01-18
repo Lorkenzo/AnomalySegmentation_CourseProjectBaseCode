@@ -6,7 +6,6 @@ import torch
 import random
 from PIL import Image
 import numpy as np
-from erfnet import ERFNet
 import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
@@ -16,6 +15,12 @@ from torch.utils.data import DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from dataset import TestDataset
+
+#Models
+from models.erfnet import ERFNet
+from models.enet import ENet
+from models.bisenet import BiSeNet
+
 seed = 42
 
 # general reproducibility
@@ -50,6 +55,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--temp',type=float, default=None)
+    parser.add_argument('--void',type=bool, default=False)
+
     args = parser.parse_args()
     anomaly_score_list = []
     ood_gts_list = []
@@ -64,7 +71,12 @@ def main():
     print ("Loading model: " + modelpath)
     print ("Loading weights: " + weightspath)
 
-    model = ERFNet(NUM_CLASSES)
+    if "erfnet" in modelpath:
+        model = ERFNet(NUM_CLASSES)
+    elif "bisenet" in modelpath:
+        model = BiSeNet(NUM_CLASSES,"resnet18")
+    elif "enet" in modelpath:
+        model = ENet(NUM_CLASSES)
 
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
@@ -72,17 +84,25 @@ def main():
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
         own_state = model.state_dict()
         for name, param in state_dict.items():
+              
             if name not in own_state:
                 if name.startswith("module."):
                     own_state[name.split("module.")[-1]].copy_(param)
                 else:
-                    print(name, " not loaded")
-                    continue
+                   continue
             else:
                 own_state[name].copy_(param)
         return model
+    
+    state_dict = torch.load(weightspath, weights_only=False, map_location=lambda storage, loc: storage)
 
-    model = load_my_state_dict(model, torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage))
+    if "erfnet" in modelpath:
+        model = load_my_state_dict(model, state_dict )
+    elif "bisenet" in modelpath:
+        model.load_state_dict(state_dict)
+    elif "enet" in modelpath:
+        model.load_state_dict(state_dict["state_dict"])
+
     print ("Model and weights LOADED successfully")
 
     if args.temp != None:
@@ -112,6 +132,12 @@ def main():
         images = images.permute(0,3,1,2)
         with torch.no_grad():
             result = model(images)
+
+        if args.void:
+            #take only background as anomaly
+            background_index = 19 # background is the last one
+            result = result[:,background_index,:,:].unsqueeze(0)
+
         anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)            
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:

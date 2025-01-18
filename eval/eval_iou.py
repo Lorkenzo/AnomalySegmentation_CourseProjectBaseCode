@@ -21,7 +21,7 @@ from torchvision.transforms import Compose, CenterCrop, Normalize, Resize
 from torchvision.transforms import ToTensor, ToPILImage
 
 from dataset import cityscapes
-from erfnet import ERFNet
+from models.erfnet import ERFNet
 from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
