@@ -1,187 +1,456 @@
+
 import torch
-from torch import nn
-from models.build_contextpath import build_contextpath
-import warnings
-warnings.filterwarnings(action='ignore')
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.utils.model_zoo as modelzoo
 
-class ConvBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2,padding=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
-
-    def forward(self, input):
-        x = self.conv1(input)
-        return self.relu(self.bn(x))
-
-class Spatial_path(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.convblock1 = ConvBlock(in_channels=3, out_channels=64)
-        self.convblock2 = ConvBlock(in_channels=64, out_channels=128)
-        self.convblock3 = ConvBlock(in_channels=128, out_channels=256)
-
-    def forward(self, input):
-        x = self.convblock1(input)
-        x = self.convblock2(x)
-        x = self.convblock3(x)
-        return x
-
-class AttentionRefinementModule(torch.nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.sigmoid = nn.Sigmoid()
-        self.in_channels = in_channels
-        self.avgpool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
-
-    def forward(self, input):
-        # global average pooling
-        x = self.avgpool(input)
-        assert self.in_channels == x.size(1), 'in_channels and out_channels should all be {}'.format(x.size(1))
-        x = self.conv(x)
-        # x = self.sigmoid(self.bn(x))
-        x = self.sigmoid(x)
-        # channels of input and x should be same
-        x = torch.mul(input, x)
-        return x
+backbone_url = 'https://github.com/CoinCheung/BiSeNet/releases/download/0.0.0/backbone_v2.pth'
 
 
-class FeatureFusionModule(torch.nn.Module):
-    def __init__(self, num_classes, in_channels):
-        super().__init__()
-        # self.in_channels = input_1.channels + input_2.channels
-        # resnet101 3328 = 256(from context path) + 1024(from spatial path) + 2048(from spatial path)
-        # resnet18  1024 = 256(from context path) + 256(from spatial path) + 512(from spatial path)
-        self.in_channels = in_channels
+class ConvBNReLU(nn.Module):
 
-        self.convblock = ConvBlock(in_channels=self.in_channels, out_channels=num_classes, stride=1)
-        self.conv1 = nn.Conv2d(num_classes, num_classes, kernel_size=1)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(num_classes, num_classes, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
-        self.avgpool = nn.AdaptiveAvgPool2d(output_size=(1, 1))
+    def __init__(self, in_chan, out_chan, ks=3, stride=1, padding=1,
+                 dilation=1, groups=1, bias=False):
+        super(ConvBNReLU, self).__init__()
+        self.conv = nn.Conv2d(
+                in_chan, out_chan, kernel_size=ks, stride=stride,
+                padding=padding, dilation=dilation,
+                groups=groups, bias=bias)
+        self.bn = nn.BatchNorm2d(out_chan)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        feat = self.conv(x)
+        feat = self.bn(feat)
+        feat = self.relu(feat)
+        return feat
 
 
-    def forward(self, input_1, input_2):
-        x = torch.cat((input_1, input_2), dim=1)
-        assert self.in_channels == x.size(1), 'in_channels of ConvBlock should be {}'.format(x.size(1))
-        feature = self.convblock(x)
-        x = self.avgpool(feature)
+class UpSample(nn.Module):
 
-        x = self.relu(self.conv1(x))
-        x = self.sigmoid(self.conv2(x))
-        x = torch.mul(feature, x)
-        x = torch.add(x, feature)
-        return x
-
-class BiSeNet(torch.nn.Module):
-    def __init__(self, num_classes, context_path):
-        super().__init__()
-        # build spatial path
-        self.saptial_path = Spatial_path()
-
-        # build context path
-        self.context_path = build_contextpath(name=context_path)
-
-        # build attention refinement module  for resnet 101
-        if context_path == 'resnet101':
-            self.attention_refinement_module1 = AttentionRefinementModule(1024, 1024)
-            self.attention_refinement_module2 = AttentionRefinementModule(2048, 2048)
-            # supervision block
-            self.supervision1 = nn.Conv2d(in_channels=1024, out_channels=num_classes, kernel_size=1)
-            self.supervision2 = nn.Conv2d(in_channels=2048, out_channels=num_classes, kernel_size=1)
-            # build feature fusion module
-            self.feature_fusion_module = FeatureFusionModule(num_classes, 3328)
-
-        elif context_path == 'resnet18':
-            # build attention refinement module  for resnet 18
-            self.attention_refinement_module1 = AttentionRefinementModule(256, 256)
-            self.attention_refinement_module2 = AttentionRefinementModule(512, 512)
-            # supervision block
-            self.supervision1 = nn.Conv2d(in_channels=256, out_channels=num_classes, kernel_size=1)
-            self.supervision2 = nn.Conv2d(in_channels=512, out_channels=num_classes, kernel_size=1)
-            # build feature fusion module
-            self.feature_fusion_module = FeatureFusionModule(num_classes, 1024)
-        else:
-            print('Error: unspport context_path network \n')
-
-        # build final convolution
-        self.conv = nn.Conv2d(in_channels=num_classes, out_channels=num_classes, kernel_size=1)
-
+    def __init__(self, n_chan, factor=2):
+        super(UpSample, self).__init__()
+        out_chan = n_chan * factor * factor
+        self.proj = nn.Conv2d(n_chan, out_chan, 1, 1, 0)
+        self.up = nn.PixelShuffle(factor)
         self.init_weight()
 
-        self.mul_lr = []
-        self.mul_lr.append(self.saptial_path)
-        self.mul_lr.append(self.attention_refinement_module1)
-        self.mul_lr.append(self.attention_refinement_module2)
-        self.mul_lr.append(self.supervision1)
-        self.mul_lr.append(self.supervision2)
-        self.mul_lr.append(self.feature_fusion_module)
-        self.mul_lr.append(self.conv)
+    def forward(self, x):
+        feat = self.proj(x)
+        feat = self.up(feat)
+        return feat
 
     def init_weight(self):
-        for name, m in self.named_modules():
-            if 'context_path' not in name:
-                if isinstance(m, nn.Conv2d):
-                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                elif isinstance(m, nn.BatchNorm2d):
-                    m.eps = 1e-5
-                    m.momentum = 0.1
-                    nn.init.constant_(m.weight, 1)
-                    nn.init.constant_(m.bias, 0)
-
-    def forward(self, input):
-        # output of spatial path
-        sx = self.saptial_path(input)
-
-        # output of context path
-        cx1, cx2, tail = self.context_path(input)
-        cx1 = self.attention_refinement_module1(cx1)
-        cx2 = self.attention_refinement_module2(cx2)
-        cx2 = torch.mul(cx2, tail)
-        # upsampling
-        cx1 = torch.nn.functional.interpolate(cx1, size=sx.size()[-2:], mode='bilinear')
-        cx2 = torch.nn.functional.interpolate(cx2, size=sx.size()[-2:], mode='bilinear')
-        cx = torch.cat((cx1, cx2), dim=1)
-
-        if self.training == True:
-            cx1_sup = self.supervision1(cx1)
-            cx2_sup = self.supervision2(cx2)
-            cx1_sup = torch.nn.functional.interpolate(cx1_sup, size=input.size()[-2:], mode='bilinear')
-            cx2_sup = torch.nn.functional.interpolate(cx2_sup, size=input.size()[-2:], mode='bilinear')
-
-        # output of feature fusion module
-        result = self.feature_fusion_module(sx, cx)
-
-        # upsampling
-        result = torch.nn.functional.interpolate(result, scale_factor=8, mode='bilinear')
-        result = self.conv(result)
-
-        if self.training == True:
-            return result, cx1_sup, cx2_sup
-
-        return result
+        nn.init.xavier_normal_(self.proj.weight, gain=1.)
 
 
-if __name__ == '__main__':
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    model = BiSeNet(32, 'resnet18')
-    # model = nn.DataParallel(model)
 
-    model = model.cuda()
-    x = torch.rand(2, 3, 256, 256)
-    record = model.parameters()
-    # for key, params in model.named_parameters():
-    #     if 'bn' in key:
-    #         params.requires_grad = False
-    #from utils import group_weight
-    # params_list = []
-    # for module in model.mul_lr:
-    #     params_list = group_weight(params_list, module, nn.BatchNorm2d, 10)
-    # params_list = group_weight(params_list, model.context_path, torch.nn.BatchNorm2d, 1)
+class DetailBranch(nn.Module):
 
-    print(model.parameters())
+    def __init__(self):
+        super(DetailBranch, self).__init__()
+        self.S1 = nn.Sequential(
+            ConvBNReLU(3, 64, 3, stride=2),
+            ConvBNReLU(64, 64, 3, stride=1),
+        )
+        self.S2 = nn.Sequential(
+            ConvBNReLU(64, 64, 3, stride=2),
+            ConvBNReLU(64, 64, 3, stride=1),
+            ConvBNReLU(64, 64, 3, stride=1),
+        )
+        self.S3 = nn.Sequential(
+            ConvBNReLU(64, 128, 3, stride=2),
+            ConvBNReLU(128, 128, 3, stride=1),
+            ConvBNReLU(128, 128, 3, stride=1),
+        )
+
+    def forward(self, x):
+        feat = self.S1(x)
+        feat = self.S2(feat)
+        feat = self.S3(feat)
+        return feat
+
+
+class StemBlock(nn.Module):
+
+    def __init__(self):
+        super(StemBlock, self).__init__()
+        self.conv = ConvBNReLU(3, 16, 3, stride=2)
+        self.left = nn.Sequential(
+            ConvBNReLU(16, 8, 1, stride=1, padding=0),
+            ConvBNReLU(8, 16, 3, stride=2),
+        )
+        self.right = nn.MaxPool2d(
+            kernel_size=3, stride=2, padding=1, ceil_mode=False)
+        self.fuse = ConvBNReLU(32, 16, 3, stride=1)
+
+    def forward(self, x):
+        feat = self.conv(x)
+        feat_left = self.left(feat)
+        feat_right = self.right(feat)
+        feat = torch.cat([feat_left, feat_right], dim=1)
+        feat = self.fuse(feat)
+        return feat
+
+
+class CEBlock(nn.Module):
+
+    def __init__(self):
+        super(CEBlock, self).__init__()
+        self.bn = nn.BatchNorm2d(128)
+        self.conv_gap = ConvBNReLU(128, 128, 1, stride=1, padding=0)
+        #TODO: in paper here is naive conv2d, no bn-relu
+        self.conv_last = ConvBNReLU(128, 128, 3, stride=1)
+
+    def forward(self, x):
+        feat = torch.mean(x, dim=(2, 3), keepdim=True)
+        feat = self.bn(feat)
+        feat = self.conv_gap(feat)
+        feat = feat + x
+        feat = self.conv_last(feat)
+        return feat
+
+
+class GELayerS1(nn.Module):
+
+    def __init__(self, in_chan, out_chan, exp_ratio=6):
+        super(GELayerS1, self).__init__()
+        mid_chan = in_chan * exp_ratio
+        self.conv1 = ConvBNReLU(in_chan, in_chan, 3, stride=1)
+        self.dwconv = nn.Sequential(
+            nn.Conv2d(
+                in_chan, mid_chan, kernel_size=3, stride=1,
+                padding=1, groups=in_chan, bias=False),
+            nn.BatchNorm2d(mid_chan),
+            nn.ReLU(inplace=True), # not shown in paper
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(
+                mid_chan, out_chan, kernel_size=1, stride=1,
+                padding=0, bias=False),
+            nn.BatchNorm2d(out_chan),
+        )
+        self.conv2[1].last_bn = True
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        feat = self.conv1(x)
+        feat = self.dwconv(feat)
+        feat = self.conv2(feat)
+        feat = feat + x
+        feat = self.relu(feat)
+        return feat
+
+
+class GELayerS2(nn.Module):
+
+    def __init__(self, in_chan, out_chan, exp_ratio=6):
+        super(GELayerS2, self).__init__()
+        mid_chan = in_chan * exp_ratio
+        self.conv1 = ConvBNReLU(in_chan, in_chan, 3, stride=1)
+        self.dwconv1 = nn.Sequential(
+            nn.Conv2d(
+                in_chan, mid_chan, kernel_size=3, stride=2,
+                padding=1, groups=in_chan, bias=False),
+            nn.BatchNorm2d(mid_chan),
+        )
+        self.dwconv2 = nn.Sequential(
+            nn.Conv2d(
+                mid_chan, mid_chan, kernel_size=3, stride=1,
+                padding=1, groups=mid_chan, bias=False),
+            nn.BatchNorm2d(mid_chan),
+            nn.ReLU(inplace=True), # not shown in paper
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(
+                mid_chan, out_chan, kernel_size=1, stride=1,
+                padding=0, bias=False),
+            nn.BatchNorm2d(out_chan),
+        )
+        self.conv2[1].last_bn = True
+        self.shortcut = nn.Sequential(
+                nn.Conv2d(
+                    in_chan, in_chan, kernel_size=3, stride=2,
+                    padding=1, groups=in_chan, bias=False),
+                nn.BatchNorm2d(in_chan),
+                nn.Conv2d(
+                    in_chan, out_chan, kernel_size=1, stride=1,
+                    padding=0, bias=False),
+                nn.BatchNorm2d(out_chan),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        feat = self.conv1(x)
+        feat = self.dwconv1(feat)
+        feat = self.dwconv2(feat)
+        feat = self.conv2(feat)
+        shortcut = self.shortcut(x)
+        feat = feat + shortcut
+        feat = self.relu(feat)
+        return feat
+
+
+class SegmentBranch(nn.Module):
+
+    def __init__(self):
+        super(SegmentBranch, self).__init__()
+        self.S1S2 = StemBlock()
+        self.S3 = nn.Sequential(
+            GELayerS2(16, 32),
+            GELayerS1(32, 32),
+        )
+        self.S4 = nn.Sequential(
+            GELayerS2(32, 64),
+            GELayerS1(64, 64),
+        )
+        self.S5_4 = nn.Sequential(
+            GELayerS2(64, 128),
+            GELayerS1(128, 128),
+            GELayerS1(128, 128),
+            GELayerS1(128, 128),
+        )
+        self.S5_5 = CEBlock()
+
+    def forward(self, x):
+        feat2 = self.S1S2(x)
+        feat3 = self.S3(feat2)
+        feat4 = self.S4(feat3)
+        feat5_4 = self.S5_4(feat4)
+        feat5_5 = self.S5_5(feat5_4)
+        return feat2, feat3, feat4, feat5_4, feat5_5
+
+
+class BGALayer(nn.Module):
+
+    def __init__(self):
+        super(BGALayer, self).__init__()
+        self.left1 = nn.Sequential(
+            nn.Conv2d(
+                128, 128, kernel_size=3, stride=1,
+                padding=1, groups=128, bias=False),
+            nn.BatchNorm2d(128),
+            nn.Conv2d(
+                128, 128, kernel_size=1, stride=1,
+                padding=0, bias=False),
+        )
+        self.left2 = nn.Sequential(
+            nn.Conv2d(
+                128, 128, kernel_size=3, stride=2,
+                padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.AvgPool2d(kernel_size=3, stride=2, padding=1, ceil_mode=False)
+        )
+        self.right1 = nn.Sequential(
+            nn.Conv2d(
+                128, 128, kernel_size=3, stride=1,
+                padding=1, bias=False),
+            nn.BatchNorm2d(128),
+        )
+        self.right2 = nn.Sequential(
+            nn.Conv2d(
+                128, 128, kernel_size=3, stride=1,
+                padding=1, groups=128, bias=False),
+            nn.BatchNorm2d(128),
+            nn.Conv2d(
+                128, 128, kernel_size=1, stride=1,
+                padding=0, bias=False),
+        )
+        self.up1 = nn.Upsample(scale_factor=4)
+        self.up2 = nn.Upsample(scale_factor=4)
+        ##TODO: does this really has no relu?
+        self.conv = nn.Sequential(
+            nn.Conv2d(
+                128, 128, kernel_size=3, stride=1,
+                padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True), # not shown in paper
+        )
+
+    def forward(self, x_d, x_s):
+        
+        dsize = x_d.size()[2:]
+        left1 = self.left1(x_d)
+        left2 = self.left2(x_d)
+        right1 = self.right1(x_s)
+        right2 = self.right2(x_s)
+        right1 = self.up1(right1)
+        left = left1 * torch.sigmoid(right1)
+        right = left2 * torch.sigmoid(right2)
+        right = self.up2(right)
+        out = self.conv(left + right)
+        return out
+
+
+
+class SegmentHead(nn.Module):
+
+    def __init__(self, in_chan, mid_chan, n_classes, up_factor=8, aux=True):
+        super(SegmentHead, self).__init__()
+        self.conv = ConvBNReLU(in_chan, mid_chan, 3, stride=1)
+        self.drop = nn.Dropout(0.1)
+        self.up_factor = up_factor
+
+        out_chan = n_classes
+        mid_chan2 = up_factor * up_factor if aux else mid_chan
+        up_factor = up_factor // 2 if aux else up_factor
+        self.conv_out = nn.Sequential(
+            nn.Sequential(
+                nn.Upsample(scale_factor=2),
+                ConvBNReLU(mid_chan, mid_chan2, 3, stride=1)
+                ) if aux else nn.Identity(),
+            nn.Conv2d(mid_chan2, out_chan, 1, 1, 0, bias=True),
+            nn.Upsample(scale_factor=up_factor, mode='bilinear', align_corners=False)
+        )
+
+    def forward(self, x):
+        feat = self.conv(x)
+        feat = self.drop(feat)
+        feat = self.conv_out(feat)
+        return feat
+
+
+class CustomArgMax(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, feat_out, dim):
+        return feat_out.argmax(dim=dim).int()
+
+    @staticmethod
+    def symbolic(g, feat_out, dim: int):
+        return g.op('CustomArgMax', feat_out, dim_i=dim)
+
+
+class BiSeNetV2(nn.Module):
+
+    def __init__(self, n_classes, aux_mode='train'):
+        super(BiSeNetV2, self).__init__()
+        self.aux_mode = aux_mode
+        self.detail = DetailBranch()
+        self.segment = SegmentBranch()
+        self.bga = BGALayer()
+
+        ## TODO: what is the number of mid chan ?
+        self.head = SegmentHead(128, 1024, n_classes, up_factor=8, aux=False)
+        if self.aux_mode == 'train':
+            self.aux2 = SegmentHead(16, 128, n_classes, up_factor=4)
+            self.aux3 = SegmentHead(32, 128, n_classes, up_factor=8)
+            self.aux4 = SegmentHead(64, 128, n_classes, up_factor=16)
+            self.aux5_4 = SegmentHead(128, 128, n_classes, up_factor=32)
+
+        self.init_weights()
+
+    def forward(self, x):
+        size = x.size()[2:]
+        feat_d = self.detail(x)
+        feat2, feat3, feat4, feat5_4, feat_s = self.segment(x)
+        feat_head = self.bga(feat_d, feat_s)
+
+        logits = self.head(feat_head)
+        if self.aux_mode == 'train':
+            logits_aux2 = self.aux2(feat2)
+            logits_aux3 = self.aux3(feat3)
+            logits_aux4 = self.aux4(feat4)
+            logits_aux5_4 = self.aux5_4(feat5_4)
+            return logits, logits_aux2, logits_aux3, logits_aux4, logits_aux5_4
+        elif self.aux_mode == 'eval':
+            return logits,
+        elif self.aux_mode == 'pred':
+            #  pred = logits.argmax(dim=1)
+            pred = CustomArgMax.apply(logits, 1)
+            return pred
+        else:
+            raise NotImplementedError
+
+    def init_weights(self):
+        for name, module in self.named_modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out')
+                if not module.bias is None: nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.modules.batchnorm._BatchNorm):
+                if hasattr(module, 'last_bn') and module.last_bn:
+                    nn.init.zeros_(module.weight)
+                else:
+                    nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        self.load_pretrain()
+
+
+    def load_pretrain(self):
+        state = modelzoo.load_url(backbone_url)
+        for name, child in self.named_children():
+            if name in state.keys():
+                child.load_state_dict(state[name], strict=True)
+
+    def get_params(self):
+        def add_param_to_list(mod, wd_params, nowd_params):
+            for param in mod.parameters():
+                if param.dim() == 1:
+                    nowd_params.append(param)
+                elif param.dim() == 4:
+                    wd_params.append(param)
+                else:
+                    print(name)
+
+        wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params = [], [], [], []
+        for name, child in self.named_children():
+            if 'head' in name or 'aux' in name:
+                add_param_to_list(child, lr_mul_wd_params, lr_mul_nowd_params)
+            else:
+                add_param_to_list(child, wd_params, nowd_params)
+        return wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params
+
+
+
+if __name__ == "__main__":
+    #  x = torch.randn(16, 3, 1024, 2048)
+    #  detail = DetailBranch()
+    #  feat = detail(x)
+    #  print('detail', feat.size())
+    #
+    #  x = torch.randn(16, 3, 1024, 2048)
+    #  stem = StemBlock()
+    #  feat = stem(x)
+    #  print('stem', feat.size())
+    #
+    #  x = torch.randn(16, 128, 16, 32)
+    #  ceb = CEBlock()
+    #  feat = ceb(x)
+    #  print(feat.size())
+    #
+    #  x = torch.randn(16, 32, 16, 32)
+    #  ge1 = GELayerS1(32, 32)
+    #  feat = ge1(x)
+    #  print(feat.size())
+    #
+    #  x = torch.randn(16, 16, 16, 32)
+    #  ge2 = GELayerS2(16, 32)
+    #  feat = ge2(x)
+    #  print(feat.size())
+    #
+    #  left = torch.randn(16, 128, 64, 128)
+    #  right = torch.randn(16, 128, 16, 32)
+    #  bga = BGALayer()
+    #  feat = bga(left, right)
+    #  print(feat.size())
+    #
+    #  x = torch.randn(16, 128, 64, 128)
+    #  head = SegmentHead(128, 128, 19)
+    #  logits = head(x)
+    #  print(logits.size())
+    #
+    #  x = torch.randn(16, 3, 1024, 2048)
+    #  segment = SegmentBranch()
+    #  feat = segment(x)[0]
+    #  print(feat.size())
+    #
+    x = torch.randn(16, 3, 1024, 2048)
+    model = BiSeNetV2(n_classes=19)
+    outs = model(x)
+    for out in outs:
+        print(out.size())
+    #  print(logits.size())
+
+    #  for name, param in model.named_parameters():
+    #      if len(param.size()) == 1:
+    #          print(name)

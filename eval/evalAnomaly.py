@@ -19,7 +19,7 @@ from dataset import TestDataset
 #Models
 from models.erfnet import ERFNet
 from models.enet import ENet
-from models.bisenet import BiSeNet
+from models.bisenet import BiSeNetV2
 
 seed = 42
 
@@ -74,7 +74,7 @@ def main():
     if "erfnet" in modelpath:
         model = ERFNet(NUM_CLASSES)
     elif "bisenet" in modelpath:
-        model = BiSeNet(NUM_CLASSES,"resnet18")
+        model = BiSeNetV2(NUM_CLASSES)
     elif "enet" in modelpath:
         model = ENet(NUM_CLASSES)
 
@@ -99,6 +99,11 @@ def main():
     if "erfnet" in modelpath:
         model = load_my_state_dict(model, state_dict )
     elif "bisenet" in modelpath:
+        # for i in state_dict.values():
+        #     print(i.size())
+        # print("--------")
+        # for i in model.state_dict().values():
+        #     print(i.size())
         model.load_state_dict(state_dict)
     elif "enet" in modelpath:
         model.load_state_dict(state_dict["state_dict"])
@@ -125,13 +130,21 @@ def main():
         model.set_temperature(valid_loader)
 
     model.eval()
+    # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
+    transform_image = transforms.Resize((704,1280))
     
     for path in glob.glob(os.path.expanduser(str(args.input[0]))):
-        print(path)
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
+        if "bisenet" in modelpath:
+            images = transform_image(images)
+
         with torch.no_grad():
-            result = model(images)
+            if "bisenet" in modelpath:
+                result = model(images)[0]
+            else:
+                result = model(images)
+            
 
         if args.void:
             #take only background as anomaly
@@ -148,6 +161,8 @@ def main():
            pathGT = pathGT.replace("jpg", "png")  
 
         mask = Image.open(pathGT)
+        if "bisenet" in modelpath:
+            mask = transform_image(mask)
         ood_gts = np.array(mask)
 
         if "RoadAnomaly" in pathGT:
