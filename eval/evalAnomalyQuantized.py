@@ -16,9 +16,13 @@ from torch.utils.data import DataLoader
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from dataset import TestDataset
+from sklearn.model_selection import train_test_split
+from torch.quantization.observer import MinMaxObserver,HistogramObserver
+from torchinfo import summary
 
 #Models
 from models.erfnet import ERFNet
+from models.erfnetQ import ERFNetQ,DownsamplerBlock
 from models.enet import ENet
 from models.bisenet import BiSeNetV2
 
@@ -35,8 +39,28 @@ NUM_CLASSES = 20
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def transform_label(label):
-        return torch.squeeze(label, 0).long()   
+        return torch.squeeze(label,0).long()   
+
+transform_image = transforms.Resize((704,1280))
+
+def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
+        own_state = model.state_dict()
+        for name, param in state_dict.items():
+              
+            if name not in own_state:
+                if name.startswith("module."):
+                    own_state[name.split("module.")[-1]].copy_(param)
+                else:
+                   continue
+            else:
+                own_state[name].copy_(param)
+        return model
+
+def compute_model_stats(model, input_size):
+    summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"])
      
 def main():
     parser = ArgumentParser()
@@ -55,8 +79,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--temp',type=float, default=None)
-    parser.add_argument('--void',type=bool, default=False)
+    parser.add_argument('--calib', type=float, default=0.1)
 
     args = parser.parse_args()
     anomaly_score_list = []
@@ -72,8 +95,10 @@ def main():
     print ("Loading model: " + modelpath)
     print ("Loading weights: " + weightspath)
 
+    # Initialize quantized model
+
     if "erfnet" in modelpath:
-        model = ERFNet(NUM_CLASSES)
+        model = ERFNetQ(NUM_CLASSES)
     elif "bisenet" in modelpath:
         model = BiSeNetV2(NUM_CLASSES)
     elif "enet" in modelpath:
@@ -82,61 +107,76 @@ def main():
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
 
-    def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
-        own_state = model.state_dict()
-        for name, param in state_dict.items():
-              
-            if name not in own_state:
-                if name.startswith("module."):
-                    own_state[name.split("module.")[-1]].copy_(param)
-                else:
-                   continue
-            else:
-                own_state[name].copy_(param)
-        return model
+    # Load pretrained model
     
     state_dict = torch.load(weightspath, weights_only=False, map_location=lambda storage, loc: storage)
 
     if "erfnet" in modelpath:
         model = load_my_state_dict(model, state_dict )
     elif "bisenet" in modelpath:
-        # for i in state_dict.values():
-        #     print(i.size())
-        # print("--------")
-        # for i in model.state_dict().values():
-        #     print(i.size())
         model.load_state_dict(state_dict)
     elif "enet" in modelpath:
         model.load_state_dict(state_dict["state_dict"])
 
+    # Prepare datasets
+    dataset_path_list = glob.glob(os.path.expanduser(str(args.input[0])))
+    dataset_length = len(dataset_path_list)
+    calib_dataset = dataset_path_list[0:int(dataset_length*args.calib)]
+    test_dataset = dataset_path_list[int(dataset_length*args.calib):]
+    image_size = torch.from_numpy(np.array(Image.open(dataset_path_list[0]).convert('RGB'))).unsqueeze(0).float().permute(0,3,1,2).shape
+    print(image_size)
+
     print ("Model and weights LOADED successfully")
-
-    if args.temp != None:
-        input_transform = transforms.Compose([
-        transforms.Resize((512, 1024)), 
-        transforms.ToTensor(),          
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
-        target_transform = transforms.Compose([
-        transforms.Resize((512, 1024)), 
-        transforms.ToTensor(),  
-        transform_label              
-        ])
-        
-        valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
-            num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    # Check stats of the model
+    print("\n\t\tComputing model stats before quantization...")
+    compute_model_stats(model, image_size)
     
-        model = ModelWithTemperature(model,args.temp)
-        model.set_temperature(valid_loader)
-
     model.eval()
-    # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
-    transform_image = transforms.Resize((704,1280))
 
     start = time.time()
+    # QUANTIZATION of the model
+
+    # Create qcofing for the quantization
+    qconfig = torch.quantization.get_default_qconfig('x86')
+
+    qconfig = qconfig._replace(
+        activation=HistogramObserver.with_args(dtype=torch.quint8),
+        weight=MinMaxObserver.with_args(dtype=torch.qint8)
+    )
+
+    # Exclude from the quantization not supported layers
+    model.qconfig = qconfig
     
-    for path in glob.glob(os.path.expanduser(str(args.input[0]))):
+    for name, layer in model.named_modules():
+        if isinstance(layer, torch.nn.ConvTranspose2d):
+            layer.qconfig = None
+        if name == "encoder.output_conv":
+            layer.qconfig = None
+        
+
+    # Prepare for quantization
+    model = torch.quantization.prepare(model, inplace=False)
+
+    if args.calib != 0.0:
+        # Calibration
+        for path in calib_dataset:
+            images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
+            images = images.permute(0,3,1,2)
+            if "bisenet" in modelpath:
+                images = transform_image(images)      
+                result = model(images)[0]
+            else:
+                result = model(images)
+        
+    # Convert to quantized model
+    
+    model = torch.quantization.convert(model, inplace=False) 
+
+    # Check new stats of the model
+    print("\n\t\tComputing model stats after quantization...")
+    compute_model_stats(model, image_size)
+
+    for path in test_dataset:
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
         if "bisenet" in modelpath:
@@ -147,12 +187,6 @@ def main():
                 result = model(images)[0]
             else:
                 result = model(images)
-            
-
-        if args.void:
-            #take only background as anomaly
-            background_index = 19 # background is the last one
-            result = result[:,background_index,:,:].unsqueeze(0)
 
         anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)            
         pathGT = path.replace("images", "labels_masks")                
@@ -216,7 +250,7 @@ def main():
 
     end = time.time()
 
-    print(f"Time for evaluation: {end-start} s")
+    print(f"Time for quantization + evaluation: {end-start} s")
 
 if __name__ == '__main__':
     main()
