@@ -19,6 +19,7 @@ from dataset import TestDataset
 from sklearn.model_selection import train_test_split
 from torch.quantization.observer import MinMaxObserver,HistogramObserver
 from torchinfo import summary
+import torch.nn.utils.prune as prune
 
 #Models
 from models.erfnet import ERFNet
@@ -60,7 +61,17 @@ def load_my_state_dict(model, state_dict):  #custom function to load model when 
         return model
 
 def compute_model_stats(model, input_size):
-    summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"])
+    summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"], depth=0)
+     
+def apply_pruning(model, amount=0.2):
+    
+    # Convolutional layers are the ones more suitable for pruning
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
+            prune.l1_unstructured(module, name='weight',amount=amount)  # Prune the weights
+            prune.remove(module, 'weight')
+    
+    return model
      
 def main():
     parser = ArgumentParser()
@@ -128,9 +139,17 @@ def main():
 
     print ("Model and weights LOADED successfully")
     # Check stats of the model
-    print("\n\t\tComputing model stats before quantization...")
+    print("\n\t\tComputing initial model stats...")
     compute_model_stats(model, image_size)
     
+    # Pruning the model 
+
+    pruning_amount = 0.35
+    model = apply_pruning(model, amount=pruning_amount)
+
+    # print("\n\t\tComputing model stats after pruning...")
+    # compute_model_stats(model, image_size)
+
     model.eval()
 
     start = time.time()
