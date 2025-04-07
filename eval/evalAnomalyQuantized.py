@@ -63,12 +63,16 @@ def load_my_state_dict(model, state_dict):  #custom function to load model when 
 def compute_model_stats(model, input_size):
     summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"], depth=0)
      
-def apply_pruning(model, amount=0.2):
+def apply_pruning(model,image_size, amount=0.2):
     
     # Convolutional layers are the ones more suitable for pruning
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
             prune.l1_unstructured(module, name='weight',amount=amount)  # Prune the weights
+
+    compute_model_stats(model, image_size)
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
             prune.remove(module, 'weight')
     
     return model
@@ -145,7 +149,7 @@ def main():
     # Pruning the model 
 
     pruning_amount = 0.35
-    model = apply_pruning(model, amount=pruning_amount)
+    model = apply_pruning(model,image_size, amount=pruning_amount)
 
     # print("\n\t\tComputing model stats after pruning...")
     # compute_model_stats(model, image_size)
