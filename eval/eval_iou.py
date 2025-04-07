@@ -24,6 +24,8 @@ from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
 
+from torch.utils.data import random_split
+
 from torch.quantization.observer import MinMaxObserver,HistogramObserver
 from torchinfo import summary
 
@@ -100,7 +102,19 @@ def main(args):
         print ("Error: datadir could not be loaded")
 
 
-    loader = DataLoader(cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    full_dataset = cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset)
+
+    if args.quantize:
+        calib_size = int(0.1 * len(full_dataset))
+        valid_size = len(full_dataset) - calib_size
+        calib_dataset, valid_dataset = random_split(full_dataset, [calib_size, valid_size])
+
+        calib_loader = DataLoader(calib_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+        loader = DataLoader(valid_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    else:
+        # fallback: no split needed
+        loader = DataLoader(full_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+
     image, _, _, _ = next(iter(loader))
     image_size = image.shape # (H, W)
 
@@ -134,18 +148,18 @@ def main(args):
         # Prepare for quantization
         model = torch.quantization.prepare(model, inplace=False)
 
-        # if args.calib != 0.0:
-        #     # Calibration
-        #     for step, (images, labels, filename, filenameGt) in enumerate(loader):
-        #         if (not args.cpu):
-        #             images = images.cuda()
-        #             labels = labels.cuda()
+        if args.calib != 0.0:
+            # Calibration
+            for step, (images, labels, filename, filenameGt) in enumerate(calib_loader):
+                if (not args.cpu):
+                    images = images.cuda()
+                    labels = labels.cuda()
 
-        #         inputs = Variable(images)
-        #         with torch.no_grad():
-        #             outputs = model(inputs)
+                inputs = Variable(images)
+                with torch.no_grad():
+                    outputs = model(inputs)
             
-        # Convert to quantized model
+        #Convert to quantized model
         
         model = torch.quantization.convert(model, inplace=False) 
 
