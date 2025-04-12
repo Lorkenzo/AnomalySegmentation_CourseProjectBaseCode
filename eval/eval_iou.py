@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import os
 import importlib
 import time
-import cityscapesscripts as cs
+#import cityscapesscripts as cs
 import torchvision.transforms as transforms
 from PIL import Image
 from argparse import ArgumentParser
@@ -148,21 +148,22 @@ def main(args):
         # Prepare for quantization
         model = torch.quantization.prepare(model, inplace=False)
 
-        if args.calib != 0.0:
-            # Calibration
-            for step, (images, labels, filename, filenameGt) in enumerate(calib_loader):
-                if (not args.cpu):
-                    images = images.cuda()
-                    labels = labels.cuda()
+        
+        # Calibration
+        for step, (images, labels, filename, filenameGt) in enumerate(calib_loader):
+            if (not args.cpu):
+                images = images.cuda()
+                labels = labels.cuda()
 
-                inputs = Variable(images)
-                with torch.no_grad():
-                    outputs = model(inputs)
+            inputs = Variable(images)
+            with torch.no_grad():
+                outputs = model(inputs)
             
         #Convert to quantized model
         
         model = torch.quantization.convert(model, inplace=False) 
-
+        model.to("cpu")
+        model = model.module if isinstance(model, torch.nn.DataParallel) else model
         # Check new stats of the model
         print("\n\t\tComputing model stats after quantization...")
         compute_model_stats(model, image_size)
