@@ -169,7 +169,7 @@ def main(args):
         compute_model_stats(model, image_size)
 
     for step, (images, labels, filename, filenameGt) in enumerate(loader):
-        if (not args.cpu):
+        if (not args.cpu and not args.quantize):
             images = images.cuda()
             labels = labels.cuda()
 
