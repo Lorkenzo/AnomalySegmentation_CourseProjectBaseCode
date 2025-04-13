@@ -111,13 +111,6 @@ def main(args):
         model = ModelWithTemperature(model, args.temp)
         model.set_temperature(valid_loader)
 
-    # Pruning the model 
-
-    pruning_amount = 0.35
-    model = apply_pruning(model,image_size, amount=pruning_amount)
-
-    model.eval()
-
     if(not os.path.exists(args.datadir)):
         print ("Error: datadir could not be loaded")
 
@@ -137,6 +130,13 @@ def main(args):
 
     image, _, _, _ = next(iter(loader))
     image_size = image.shape # (H, W)
+    
+    # Pruning the model 
+
+    pruning_amount = 0.35
+    model = apply_pruning(model,image_size, amount=pruning_amount)
+
+    model.eval()
 
     iouEvalVal = iouEval(NUM_CLASSES)
 
