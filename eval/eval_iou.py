@@ -28,6 +28,7 @@ from torch.utils.data import random_split
 
 from torch.quantization.observer import MinMaxObserver,HistogramObserver
 from torchinfo import summary
+import torch.nn.utils.prune as prune
 
 NUM_CHANNELS = 3
 NUM_CLASSES = 20
@@ -45,6 +46,20 @@ target_transform_cityscapes = Compose([
 
 def compute_model_stats(model, input_size):
     summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"], depth=0)
+
+def apply_pruning(model,image_size, amount=0.2):
+    
+    # Convolutional layers are the ones more suitable for pruning
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
+            prune.l1_unstructured(module, name='weight',amount=amount)  # Prune the weights
+
+    #compute_model_stats(model, image_size)
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
+            prune.remove(module, 'weight')
+    
+    return model
    
 def main(args):
 
@@ -96,6 +111,11 @@ def main(args):
         model = ModelWithTemperature(model, args.temp)
         model.set_temperature(valid_loader)
 
+    # Pruning the model 
+
+    pruning_amount = 0.35
+    model = apply_pruning(model,image_size, amount=pruning_amount)
+
     model.eval()
 
     if(not os.path.exists(args.datadir)):
@@ -126,7 +146,7 @@ def main(args):
 
         if (torch.cuda.is_available() and not args.cpu):
           model = model.cuda()
-          
+
         print("\n\t\tComputing initial model stats...")
         compute_model_stats(model, image_size)
 
