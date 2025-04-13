@@ -105,7 +105,7 @@ def main(args):
     full_dataset = cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset)
 
     if args.quantize:
-        calib_size = int(0.1 * len(full_dataset))
+        calib_size = int(0.1* len(full_dataset))
         valid_size = len(full_dataset) - calib_size
         calib_dataset, valid_dataset = random_split(full_dataset, [calib_size, valid_size])
 
@@ -123,6 +123,10 @@ def main(args):
     start = time.time()
 
     if args.quantize:
+
+        if (torch.cuda.is_available() and not args.cpu):
+          model = model.cuda()
+          
         print("\n\t\tComputing initial model stats...")
         compute_model_stats(model, image_size)
 
@@ -147,26 +151,25 @@ def main(args):
 
         # Prepare for quantization
         model = torch.quantization.prepare(model, inplace=False)
-
         
         # Calibration
         for step, (images, labels, filename, filenameGt) in enumerate(calib_loader):
-            if (not args.cpu):
-                images = images.cuda()
-                labels = labels.cuda()
+            if (torch.cuda.is_available() and not args.cpu):
+              images = images.cuda()
+              labels = labels.cuda()
 
             inputs = Variable(images)
             with torch.no_grad():
                 outputs = model(inputs)
             
         #Convert to quantized model
-        
+        if (torch.cuda.is_available() and not args.cpu):
+            model.cpu()
+      
         model = torch.quantization.convert(model, inplace=False) 
-        model.to("cpu")
-        model = model.module if isinstance(model, torch.nn.DataParallel) else model
         # Check new stats of the model
         print("\n\t\tComputing model stats after quantization...")
-        compute_model_stats(model, image_size)
+        #compute_model_stats(model, image_size)
 
     for step, (images, labels, filename, filenameGt) in enumerate(loader):
         if (not args.cpu and not args.quantize):
