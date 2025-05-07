@@ -20,6 +20,7 @@ from models.erfnet import ERFNet
 from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
+import random
 
 
 #Models
@@ -41,8 +42,9 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
 def transform_label(label):
-        return torch.squeeze(label, 0).long()   
-     
+    return torch.squeeze(label, 0).long()
+
+
 def remove_module_prefix(state_dict):
     new_state_dict = {}
     for k, v in state_dict.items():
@@ -51,7 +53,7 @@ def remove_module_prefix(state_dict):
     return new_state_dict
 
 def load_model(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     model = ERFNet(NUM_CLASSES)
     modelpath = args.loadDir + args.loadModel
     weightspath = args.loadDir + args.loadWeights
@@ -72,7 +74,7 @@ def load_model(args):
 
 def get_feature_extractor(model, layers):
     features = {}
-    layers_copy = layers.copy() 
+    layers_copy = layers.copy()
 
     def hook_gen(layer_name):
         def hook(module, input, output):
@@ -91,33 +93,19 @@ def get_feature_extractor(model, layers):
     return extractor
 
 def compute_class_means(features, labels):
-    """
-    Calcola la media µ_c per ogni classe c.
-    Args:
-        features (ndarray): matrice di forma (N, D)
-        labels (ndarray): vettore di etichette di forma (N,)
-    Returns:
-        dict: chiavi = classi c, valori = µ_c (ndarray di forma (D,))
-    """
+    print(f"Shape of features inside compute_class_means: {features.shape}")
+    print(f"Shape of labels inside compute_class_means: {labels.shape}")
     class_means = {}
     classes = np.unique(labels)
     for c in classes:
         class_features = features[labels == c]
-        mu_c = np.mean(class_features, axis=0)
-        class_means[c] = mu_c
+        if class_features.size > 0:
+            mu_c = np.mean(class_features, axis=0)
+            class_means[c] = mu_c
     return class_means
 
 
 def compute_covariance(features, labels, class_means):
-    """
-    Calcola la matrice di covarianza complessiva.
-    Args:
-        features (ndarray): matrice di forma (N, D)
-        labels (ndarray): vettore di etichette di forma (N,)
-        class_means (dict): dizionario µ_c per ciascuna classe
-    Returns:
-        ndarray: matrice di covarianza di forma (D, D)
-    """
     N = features.shape[0]
     D = features.shape[1]
     covariance = np.zeros((D, D))
@@ -125,79 +113,67 @@ def compute_covariance(features, labels, class_means):
     for i in range(N):
         x_i = features[i]
         y_i = labels[i]
-        mu_c = class_means[y_i]
-        diff = (x_i - mu_c).reshape(-1, 1)
-        covariance += diff @ diff.T
+        if y_i in class_means:
+            mu_c = class_means[y_i]
+            diff = (x_i - mu_c).reshape(-1, 1)
+            covariance += diff @ diff.T
 
-    return covariance / N
+    return covariance / N if N > 0 else np.eye(D)
 
 def mahalanobis_distance(x, mu, inv_cov):
-    """
-    Calcola la distanza di Mahalanobis tra x e mu con matrice di covarianza inversa.
-    """
     diff = x - mu
     return diff.T @ inv_cov @ diff
 
-
 def compute_mahalanobis_confidence(x, model, feature_extractor, class_means, inv_covs, alpha, epsilon):
-    """
-    Calcola il punteggio di confidenza basato sulla distanza di Mahalanobis.
-
-    Args:
-        x (ndarray): input test sample (numpy array o torch, dipende dal framework usato)
-        model: il modello completo (es. rete neurale)
-        feature_extractor: funzione che estrae feature da tutti i layer (ritorna lista f_l(x))
-        class_means (dict): dizionario {layer -> {class_label -> µ_l,c}}
-        inv_covs (dict): dizionario {layer -> inv(Σ_l)}
-        alpha (dict): pesi alpha_l della combinazione lineare
-        epsilon (float): valore del rumore per perturbare l'input
-
-    Returns:
-        float: confidence score finale
-    """
     M = {}  # M_l per ogni layer
 
     features = feature_extractor(x)
 
-    for l, f_l_x in features.items():
-        mu_l = class_means[l]
-        inv_cov_l = inv_covs[l]
+    for l, feat_map in features.items():
+        if l in class_means and l in inv_covs and l in alpha:
+            mu_l = class_means[l]
+            inv_cov_l = inv_covs[l]
 
-        # Trova la classe più vicina
-        distances = {c: mahalanobis_distance(f_l_x, mu_l[c], inv_cov_l) for c in mu_l}
-        closest_class = min(distances, key=distances.get)
-        mu_closest = mu_l[closest_class]
+            feat_shape = feat_map.shape
+            if len(feat_shape) == 3:
+                num_channels, height, width = feat_shape
+                batch_size = 1
+            elif len(feat_shape) == 4:
+                batch_size, num_channels, height, width = feat_shape
+            else:
+                print(f"Unexpected feature map shape: {feat_shape}")
+                continue
 
-        # Calcola gradiente per perturbazione (simulata: qui semplificata)
-        # In pratica, dovresti usare backprop per ∇ₓ Mahalanobis(f_l(x), µ_l,c)
-        # Qui semplifichiamo con il gradiente del L2 solo per esempio
-        grad_sim = np.sign(f_l_x - mu_closest)
+            # Flatten the spatial dimensions of the feature map
+            flattened_feat_map = feat_map.reshape(batch_size, num_channels, -1).transpose(0, 2, 1).reshape(-1, num_channels)
 
-        # Perturba x (qui supponiamo sia nello spazio feature già, altrimenti servirebbe grad reale)
-        f_l_x_perturbed = f_l_x - epsilon * grad_sim
+            distances = {}
+            for c in mu_l:
+                # Calculate Mahalanobis distance for each feature vector to the class mean
+                dist_to_class = np.array([mahalanobis_distance(f, mu_l[c], inv_cov_l) for f in flattened_feat_map])
+                distances[c] = np.mean(dist_to_class) # Or perhaps min/max depending on your anomaly definition
 
-        # Calcola punteggio massimo di Mahalanobis con x perturbato
-        perturbed_distances = {
-            c: mahalanobis_distance(f_l_x_perturbed, mu_l[c], inv_cov_l)
-            for c in mu_l
-        }
-        M[l] = -min(perturbed_distances.values())  # Negativo perché score = max( -dist )
+            if distances:
+                closest_class = min(distances, key=distances.get)
+                mu_closest = mu_l[closest_class]
 
-    # Calcolo della confidence finale con pesi α_l
-    confidence = sum(alpha[l] * M[l] for l in M)
+                # Flatten the feature map for perturbation as well
+                grad_sim = np.sign(flattened_feat_map - mu_closest)
+                f_l_x_perturbed = flattened_feat_map - epsilon * grad_sim
+
+                perturbed_distances = {}
+                for c in mu_l:
+                    perturbed_dist_to_class = np.array([mahalanobis_distance(f, mu_l[c], inv_cov_l) for f in f_l_x_perturbed])
+                    perturbed_distances[c] = np.mean(perturbed_dist_to_class)
+
+                if perturbed_distances:
+                    M[l] = -min(perturbed_distances.values())  # Negativo perché score = max( -dist )
+
+    confidence = sum(alpha.get(l, 0) * M.get(l, 0) for l in alpha)
     return confidence
 
 def main(args):
-    model = ERFNet(NUM_CLASSES)
-    weightspath = args.loadDir + args.loadWeights
-
-    if not args.cpu:
-        model = torch.nn.DataParallel(model).cuda()
-
-    state_dict = torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage)
-    state_dict = remove_module_prefix(state_dict)
-    model.load_state_dict(state_dict, strict=False)
-    model.eval()
+    model = load_model(args)
 
     input_transform = transforms.Compose([
         transforms.Resize((128, 512)),
@@ -212,42 +188,84 @@ def main(args):
     loader = DataLoader(cityscapes(args.datadir, input_transform, target_transform, subset=args.subset),
                         num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
 
-    selected_layers = ['encoder.layers.0.downsample']
-    feature_extractor = get_feature_extractor(model, selected_layers.copy())
+    # ********************** CORRECTION 1: Choose the layer **********************
+    selected_layer_name = 'module.decoder.output_conv'
+    # ****************************************************************************
+
+    feature_extractor = get_feature_extractor(model, [selected_layer_name])
 
     all_features = []
     all_labels = []
 
+    print(f"Extracting features from layer: {selected_layer_name} for mean and covariance calculation...")
     for step, (images, labels, _, _) in enumerate(loader):
-        if not args.cpu:
+        if not args.cpu and torch.cuda.is_available():
             images = images.cuda()
             labels = labels.cuda()
 
         feats = feature_extractor(images)
         for layer_name, feat in feats.items():
-            all_features.append(feat.reshape(-1, feat.shape[-1]))
-            all_labels.append(labels.cpu().numpy().reshape(-1))
+            if layer_name == selected_layer_name:
+                # ********************** CORRECTION 2: Reshape features (without permute) **********************
+                feat_shape = feat.shape
+                if len(feat_shape) == 4:
+                    batch_size, num_channels, height, width = feat_shape
+                    reshaped_feat = feat.reshape(batch_size, num_channels, -1).transpose(0, 2, 1).reshape(-1, num_channels)
+                else:
+                    # Assuming shape is (C, H, W) - reshape to (H*W, C)
+                    num_channels, height, width = feat_shape
+                    reshaped_feat = feat.reshape(num_channels, -1).transpose(1, 0)
+                # ****************************************************************************
+                flattened_labels = labels.cpu().numpy().reshape(-1)
+
+                all_features.append(reshaped_feat)
+                all_labels.append(flattened_labels)
+
+        print(f"Processed batch {step + 1} for feature extraction.")
         if step > 20:
             break
+
+    print(f"Length of all_features: {len(all_features)}")
+    print(f"Length of all_labels: {len(all_labels)}")
+
+    if not all_features:
+        print("Error: all_features is empty. Check data loading and feature extraction.")
+        return
+    if not all_labels:
+        print("Error: all_labels is empty. Check data loading and label handling.")
+        return
 
     all_features = np.concatenate(all_features, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
 
-    class_means = {selected_layers[0]: compute_class_means(all_features, all_labels)}
-    cov = compute_covariance(all_features, all_labels, class_means[selected_layers[0]])
-    inv_covs = {selected_layers[0]: np.linalg.inv(cov)}
-    alpha = {selected_layers[0]: 1.0}
+    print(f"Shape of all_features after concatenation: {all_features.shape}")
+    print(f"Shape of all_labels after concatenation: {all_labels.shape}")
+
+    class_means = {selected_layer_name: compute_class_means(all_features, all_labels)}
+    cov = compute_covariance(all_features, all_labels, class_means[selected_layer_name])
+    try:
+        inv_covs = {selected_layer_name: np.linalg.inv(cov)}
+    except np.linalg.LinAlgError:
+        print("Error: Singular covariance matrix. Cannot compute inverse.")
+        return
+    alpha = {selected_layer_name: 1.0}
 
     all_scores = []
 
-    for step, (images, labels, filename, _) in enumerate(loader):
-        if not args.cpu:
+    print("Computing Mahalanobis confidence scores...")
+    loader_eval = DataLoader(cityscapes(args.datadir, input_transform, target_transform, subset=args.subset),
+                             num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+
+    feature_extractor_eval = get_feature_extractor(model, [selected_layer_name])
+
+    for step, (images, labels, filename, _) in enumerate(loader_eval):
+        if not args.cpu and torch.cuda.is_available():
             images = images.cuda()
         confidence_score = compute_mahalanobis_confidence(
-            images, model, feature_extractor, class_means, inv_covs, alpha, epsilon=0.01
+            images, model, feature_extractor_eval, class_means, inv_covs, alpha, epsilon=0.01
         )
-        print(f"{step}: {filename[0]} -> Mahalanobis confidence score: {confidence_score:.4f}")
-        all_scores.append((filename[0], confidence_score))
+        print(f"{step}: {filename} -> Mahalanobis confidence score: {confidence_score:.4f}")
+        all_scores.append((filename, confidence_score))
 
     with open("mahalanobis_scores.txt", "w") as f:
         for fname, score in all_scores:
