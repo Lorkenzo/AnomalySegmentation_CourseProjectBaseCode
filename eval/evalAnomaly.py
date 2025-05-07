@@ -37,6 +37,57 @@ torch.backends.cudnn.benchmark = True
 
 def transform_label(label):
         return torch.squeeze(label, 0).long()   
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+def plot_anomaly_map(image_path, label_path, anomaly_map, anomaly_map_full):
+    """
+    image_path: percorso dell'immagine originale
+    anomaly_map: numpy array 2D con punteggi di anomalia (valori tra 0 e 1)
+    """
+    # Carica immagine originale
+    image = Image.open(image_path).convert('RGB')
+    image = np.array(image)
+
+    # Carica label originale
+    label = Image.open(label_path).convert('RGB')
+    label = np.array(label)
+
+    # Ridimensiona anomaly map per matchare l'immagine
+   
+    anomaly_map_resized = anomaly_map
+
+    plt.figure(figsize=(15,5))
+    
+    # Immagine originale
+    plt.subplot(1, 4, 1)
+    plt.imshow(image)
+    plt.title("Input Image")
+    plt.axis('off')
+
+    # Anomaly map (grayscale)
+    plt.subplot(1, 4, 2)
+    plt.imshow(label)
+    plt.title("Label Image ")
+    plt.axis('off')
+
+    # Anomaly map (colormap heat)
+    plt.subplot(1, 4, 3)
+    
+    plt.imshow(anomaly_map_full, cmap="gray")
+    plt.title("Anomaly Map")
+    plt.axis('off')
+
+    plt.subplot(1, 4, 4)
+    
+    plt.imshow(anomaly_map_resized, cmap="gray")
+    plt.title("Anomaly Map Void")
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
      
 def main():
     parser = ArgumentParser()
@@ -56,7 +107,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--temp',type=float, default=None)
-    parser.add_argument('--void',type=bool, default=False)
+    parser.add_argument('--void', action='store_true')
 
     args = parser.parse_args()
     anomaly_score_list = []
@@ -100,11 +151,6 @@ def main():
     if "erfnet" in modelpath:
         model = load_my_state_dict(model, state_dict )
     elif "bisenet" in modelpath:
-        # for i in state_dict.values():
-        #     print(i.size())
-        # print("--------")
-        # for i in model.state_dict().values():
-        #     print(i.size())
         model.load_state_dict(state_dict)
     elif "enet" in modelpath:
         model.load_state_dict(state_dict["state_dict"])
@@ -135,7 +181,7 @@ def main():
     transform_image = transforms.Resize((704,1280))
 
     start = time.time()
-    
+
     for path in glob.glob(os.path.expanduser(str(args.input[0]))):
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
@@ -147,14 +193,14 @@ def main():
                 result = model(images)[0]
             else:
                 result = model(images)
-            
+        
+        #take only background as anomaly
+        background_index = 19 # background is the last one
+        result_void = result[:,background_index,:,:].unsqueeze(0)
 
-        if args.void:
-            #take only background as anomaly
-            background_index = 19 # background is the last one
-            result = result[:,background_index,:,:].unsqueeze(0)
-
-        anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)            
+        anomaly_result_void = 1.0 - np.max(result_void.squeeze(0).data.cpu().numpy(), axis=0)  
+        anomaly_result_full = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)  
+        
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:
            pathGT = pathGT.replace("webp", "png")
@@ -162,7 +208,7 @@ def main():
            pathGT = pathGT.replace("jpg", "png")                
         if "RoadAnomaly" in pathGT:
            pathGT = pathGT.replace("jpg", "png")  
-
+        
         mask = Image.open(pathGT)
         if "bisenet" in modelpath:
             mask = transform_image(mask)
@@ -183,9 +229,16 @@ def main():
         if 1 not in np.unique(ood_gts):
             continue              
         else:
-             ood_gts_list.append(ood_gts)
-             anomaly_score_list.append(anomaly_result)
-        del result, anomaly_result, ood_gts, mask
+            ood_gts_list.append(ood_gts)
+            if args.void:
+                anomaly_score_list.append(anomaly_result_void)
+            else:
+                anomaly_score_list.append(anomaly_result_full)
+
+        # Plot comparison between void and full classifier
+        #plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
+            
+        del result, anomaly_result_void,anomaly_result_full, ood_gts, mask
         torch.cuda.empty_cache()
 
     file.write( "\n")

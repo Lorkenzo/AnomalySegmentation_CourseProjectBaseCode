@@ -95,6 +95,8 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     parser.add_argument('--calib', type=float, default=0.1)
+    parser.add_argument('--prune', type=float, default=0.2)
+    parser.add_argument('--void',type=bool, default=False)
 
     args = parser.parse_args()
     anomaly_score_list = []
@@ -111,13 +113,7 @@ def main():
     print ("Loading weights: " + weightspath)
 
     # Initialize quantized model
-
-    if "erfnet" in modelpath:
-        model = ERFNetQ(NUM_CLASSES)
-    elif "bisenet" in modelpath:
-        model = BiSeNetV2(NUM_CLASSES)
-    elif "enet" in modelpath:
-        model = ENet(NUM_CLASSES)
+    model = ERFNetQ(NUM_CLASSES)
 
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
@@ -128,10 +124,6 @@ def main():
 
     if "erfnet" in modelpath:
         model = load_my_state_dict(model, state_dict )
-    elif "bisenet" in modelpath:
-        model.load_state_dict(state_dict)
-    elif "enet" in modelpath:
-        model.load_state_dict(state_dict["state_dict"])
 
     # Prepare datasets
     dataset_path_list = glob.glob(os.path.expanduser(str(args.input[0])))
@@ -148,7 +140,7 @@ def main():
     
     # Pruning the model 
 
-    pruning_amount = 0.35
+    pruning_amount = args.prune
     model = apply_pruning(model,image_size, amount=pruning_amount)
 
     # print("\n\t\tComputing model stats after pruning...")
@@ -202,16 +194,18 @@ def main():
     for path in test_dataset:
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
-        if "bisenet" in modelpath:
-            images = transform_image(images)
-
+    
         with torch.no_grad():
-            if "bisenet" in modelpath:
-                result = model(images)[0]
-            else:
-                result = model(images)
+            result = model(images)
 
-        anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)            
+        
+        #take only background as anomaly
+        background_index = 19 # background is the last one
+        result_void = result[:,background_index,:,:].unsqueeze(0)
+
+        anomaly_result_void = 1.0 - np.max(result_void.squeeze(0).data.cpu().numpy(), axis=0)  
+        anomaly_result_full = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)  
+
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:
            pathGT = pathGT.replace("webp", "png")
@@ -240,9 +234,12 @@ def main():
         if 1 not in np.unique(ood_gts):
             continue              
         else:
-             ood_gts_list.append(ood_gts)
-             anomaly_score_list.append(anomaly_result)
-        del result, anomaly_result, ood_gts, mask
+            ood_gts_list.append(ood_gts)
+            if args.void:
+                anomaly_score_list.append(anomaly_result_void)
+            else:
+                anomaly_score_list.append(anomaly_result_full)
+        del result, anomaly_result_full,anomaly_result_void, ood_gts, mask
         torch.cuda.empty_cache()
 
     file.write( "\n")
