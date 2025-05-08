@@ -27,6 +27,7 @@ from models.erfnetQ import ERFNetQ,DownsamplerBlock
 from models.enet import ENet
 from models.bisenet import BiSeNetV2
 
+from evalAnomaly import plot_anomaly_map
 seed = 42
 
 # general reproducibility
@@ -53,11 +54,11 @@ def load_my_state_dict(model, state_dict):  #custom function to load model when 
               
             if name not in own_state:
                 if name.startswith("module."):
-                    own_state[name.split("module.")[-1]].copy_(param)
+                    own_state[name.split("module.")[-1]] = param
                 else:
                    continue
             else:
-                own_state[name].copy_(param)
+                own_state[name] = param 
         return model
 
 def compute_model_stats(model, input_size):
@@ -87,16 +88,14 @@ def main():
         "or a single glob pattern such as 'directory/*.jpg'",
     )  
     parser.add_argument('--loadDir',default="trained_models/")
-    parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
+    parser.add_argument('--loadWeights', default="erfnet_quantized.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
     parser.add_argument('--num-workers', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
-    parser.add_argument('--calib', type=float, default=0.1)
-    parser.add_argument('--prune', type=float, default=0.2)
-    parser.add_argument('--void',type=bool, default=False)
+    parser.add_argument('--void',action='store_true')
 
     args = parser.parse_args()
     anomaly_score_list = []
@@ -122,31 +121,14 @@ def main():
     
     state_dict = torch.load(weightspath, weights_only=False, map_location=lambda storage, loc: storage)
 
-    if "erfnet" in modelpath:
-        model = load_my_state_dict(model, state_dict )
-
-    # Prepare datasets
+    # get image size
     dataset_path_list = glob.glob(os.path.expanduser(str(args.input[0])))
-    dataset_length = len(dataset_path_list)
-    calib_dataset = dataset_path_list[0:int(dataset_length*args.calib)]
-    test_dataset = dataset_path_list[int(dataset_length*args.calib):]
     image_size = torch.from_numpy(np.array(Image.open(dataset_path_list[0]).convert('RGB'))).unsqueeze(0).float().permute(0,3,1,2).shape
-    print(image_size)
 
     print ("Model and weights LOADED successfully")
     # Check stats of the model
     print("\n\t\tComputing initial model stats...")
     compute_model_stats(model, image_size)
-    
-    # Pruning the model 
-
-    pruning_amount = args.prune
-    model = apply_pruning(model,image_size, amount=pruning_amount)
-
-    # print("\n\t\tComputing model stats after pruning...")
-    # compute_model_stats(model, image_size)
-
-    model.eval()
 
     start = time.time()
     # QUANTIZATION of the model
@@ -167,31 +149,21 @@ def main():
             layer.qconfig = None
         if name == "encoder.output_conv":
             layer.qconfig = None
-        
 
-    # Prepare for quantization
     model = torch.quantization.prepare(model, inplace=False)
-
-    if args.calib != 0.0:
-        # Calibration
-        for path in calib_dataset:
-            images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
-            images = images.permute(0,3,1,2)
-            if "bisenet" in modelpath:
-                images = transform_image(images)      
-                result = model(images)[0]
-            else:
-                result = model(images)
-        
-    # Convert to quantized model
-    
     model = torch.quantization.convert(model, inplace=False) 
+
+    model = load_my_state_dict(model, state_dict )
 
     # Check new stats of the model
     print("\n\t\tComputing model stats after quantization...")
     compute_model_stats(model, image_size)
 
-    for path in test_dataset:
+    start = time.time()
+
+    model.eval()
+
+    for i,path in enumerate(glob.glob(os.path.expanduser(str(args.input[0])))):
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
     
@@ -239,6 +211,11 @@ def main():
                 anomaly_score_list.append(anomaly_result_void)
             else:
                 anomaly_score_list.append(anomaly_result_full)
+
+        # Plot comparison between void and full classifier
+        if i == 1:
+            plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
+
         del result, anomaly_result_full,anomaly_result_void, ood_gts, mask
         torch.cuda.empty_cache()
 

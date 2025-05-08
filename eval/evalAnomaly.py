@@ -182,7 +182,7 @@ def main():
 
     start = time.time()
 
-    for path in glob.glob(os.path.expanduser(str(args.input[0]))):
+    for i, path in enumerate(glob.glob(os.path.expanduser(str(args.input[0])))):
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
         if "bisenet" in modelpath:
@@ -236,7 +236,8 @@ def main():
                 anomaly_score_list.append(anomaly_result_full)
 
         # Plot comparison between void and full classifier
-        #plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
+        if i == 1:
+            plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
             
         del result, anomaly_result_void,anomaly_result_full, ood_gts, mask
         torch.cuda.empty_cache()
