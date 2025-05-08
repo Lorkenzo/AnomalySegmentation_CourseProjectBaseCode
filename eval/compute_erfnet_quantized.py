@@ -22,7 +22,7 @@ from models.erfnetQ import ERFNetQ
 from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
-
+from tqdm.auto import tqdm
 from torch.utils.data import random_split
 
 from torch.quantization.observer import MinMaxObserver,HistogramObserver
@@ -68,12 +68,9 @@ def main(args):
     print ("Loading model: " + modelpath)
     print ("Loading weights: " + weightspath)
 
-    if args.quantize:
-        model = ERFNetQ(NUM_CLASSES)
-    else: 
-        model = ERFNet(NUM_CLASSES)
-
-    #model = torch.nn.DataParallel(model)
+    
+    model = ERFNetQ(NUM_CLASSES)
+    
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
 
@@ -140,8 +137,9 @@ def main(args):
     # Prepare for quantization
     model = torch.quantization.prepare(model, inplace=False)
     
+    print("Calibrating quantized model..")
     # Calibration
-    for step, (images, labels, _, _) in enumerate(calib_loader):
+    for images, labels, _, _ in tqdm(calib_loader):
         if (torch.cuda.is_available() and not args.cpu):
             images = images.cuda()
             labels = labels.cuda()
@@ -156,14 +154,14 @@ def main(args):
     
     model = torch.quantization.convert(model, inplace=False) 
     # Check new stats of the model
-    print("\n\t\tComputing model stats after quantization...")
+    #print("\n\t\tComputing model stats after quantization...")
     #compute_model_stats(model, image_size)
 
     end = time.time()
 
     print(f"Time for quantization: {end-start} s")
-    torch.save(model.state_dict(),f"./trained_models/erfnet_quantized_{int(args.prune*100)}.pth")
-    print(f"model saved to ./trained_models/erfnet_quantized_{int(args.prune*100)}.pth")
+    torch.save(model.state_dict(),f"{args.loadDir}/erfnet_quantized_{int(args.prune*100)}.pth")
+    print(f"model saved to trained_models/erfnet_quantized_{int(args.prune*100)}.pth")
     
 if __name__ == '__main__':
 
