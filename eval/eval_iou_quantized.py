@@ -52,12 +52,12 @@ def load_my_state_dict(model, state_dict):  #custom function to load model when 
         for name, param in state_dict.items():
             if name not in own_state:
                 if name.startswith("module."):
-                    own_state[name.split("module.")[-1]].copy_(param)
+                    own_state[name.split("module.")[-1]] = param
                 else:
                     print(name, " not loaded")
                     continue
             else:
-                own_state[name].copy_(param)
+                own_state[name] = param
         return model
    
 def main(args):
@@ -87,18 +87,12 @@ def main(args):
 
     loader = DataLoader(full_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
 
-    image, _, _, _ = next(iter(loader))
-    image_size = image.shape # (H, W)
-
     iouEvalVal = iouEval(NUM_CLASSES)
 
     start = time.time()
 
     if (torch.cuda.is_available() and not args.cpu):
         model = model.cuda()
-
-    print("\n\t\tComputing initial model stats...")
-    compute_model_stats(model, image_size)
 
     # QUANTIZATION of the model
 
@@ -128,9 +122,7 @@ def main(args):
     
     model = torch.quantization.convert(model, inplace=False) 
     # Check new stats of the model
-    print("\n\t\tComputing model stats after quantization...")
-    #compute_model_stats(model, image_size)
-
+    
     model = load_my_state_dict(model, state_dict )
 
     model.eval()
