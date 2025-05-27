@@ -42,22 +42,30 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-def plot_anomaly_map(image_path, label_path, anomaly_map, anomaly_map_full):
+def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map_full):
     """
     image_path: percorso dell'immagine originale
     anomaly_map: numpy array 2D con punteggi di anomalia (valori tra 0 e 1)
     """
     # Carica immagine originale
     image = Image.open(image_path).convert('RGB')
+
+    if "bisenet" in modelpath:
+            if "RoadAnomaly" in image_path:
+                # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
+                transform_label = transforms.Resize((704,1280))
+                image = transform_label(image)
+            elif "RoadObsticle" in image_path:
+                transform_label = transforms.Resize((1056,1920))
+                image = transform_label(image)
+
     image = np.array(image)
-
-    # Carica label originale
-    label = Image.open(label_path).convert('RGB')
-    label = np.array(label)
-
-    # Ridimensiona anomaly map per matchare l'immagine
    
     anomaly_map_resized = anomaly_map
+
+    overlay = np.zeros_like(image, dtype=np.uint8)
+    overlay[label_path == 255] = [255, 255, 255]
+    overlay[label_path == 1] = [255, 0, 0]
 
     plt.figure(figsize=(15,5))
     
@@ -69,13 +77,12 @@ def plot_anomaly_map(image_path, label_path, anomaly_map, anomaly_map_full):
 
     # Anomaly map (grayscale)
     plt.subplot(1, 4, 2)
-    plt.imshow(label)
-    plt.title("Label Image ")
+    plt.imshow(overlay)
+    plt.title("Anomaly Label")
     plt.axis('off')
 
     # Anomaly map (colormap heat)
     plt.subplot(1, 4, 3)
-    
     plt.imshow(anomaly_map_full, cmap="gray")
     plt.title("Anomaly Map")
     plt.axis('off')
@@ -177,16 +184,21 @@ def main():
         model.set_temperature(valid_loader)
 
     model.eval()
-    # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
-    transform_image = transforms.Resize((704,1280))
 
     start = time.time()
 
     for i, path in enumerate(glob.glob(os.path.expanduser(str(args.input[0])))):
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
+        
         if "bisenet" in modelpath:
-            images = transform_image(images)
+            if "RoadAnomaly" in path:
+                # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
+                transform_image = transforms.Resize((704,1280))
+                images = transform_image(images)
+            elif "RoadObsticle" in path:
+                transform_image = transforms.Resize((1056,1920))
+                images = transform_image(images)
 
         with torch.no_grad():
             if "bisenet" in modelpath:
@@ -211,7 +223,14 @@ def main():
         
         mask = Image.open(pathGT)
         if "bisenet" in modelpath:
-            mask = transform_image(mask)
+            if "RoadAnomaly" in path:
+                # Needed for bisenet in order to have dimensions multiple of 32 (cause the model downsample the images by 32)
+                transform_label = transforms.Resize((704,1280))
+                mask = transform_label(mask)
+            elif "RoadObsticle" in path:
+                transform_label = transforms.Resize((1056,1920))
+                mask = transform_label(mask)
+
         ood_gts = np.array(mask)
 
         if "RoadAnomaly" in pathGT:
@@ -236,8 +255,8 @@ def main():
                 anomaly_score_list.append(anomaly_result_full)
 
         # Plot comparison between void and full classifier
-        if i == 1:
-            plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
+        if "1." in path:
+           plot_anomaly_map(modelpath, path,ood_gts,anomaly_result_void,anomaly_result_full)  
             
         del result, anomaly_result_void,anomaly_result_full, ood_gts, mask
         torch.cuda.empty_cache()

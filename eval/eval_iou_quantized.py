@@ -23,7 +23,7 @@ from models.erfnetQ import ERFNetQ
 from temperature_scaling import ModelWithTemperature
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
-
+from tqdm.auto import tqdm
 from torch.utils.data import random_split
 
 from torch.quantization.observer import MinMaxObserver,HistogramObserver
@@ -47,18 +47,19 @@ target_transform_cityscapes = Compose([
 def compute_model_stats(model, input_size):
     summary(model, input_size=input_size, col_names=["input_size", "output_size", "num_params", "mult_adds"], depth=0)
 
-def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
-        own_state = model.state_dict()
-        for name, param in state_dict.items():
-            if name not in own_state:
-                if name.startswith("module."):
-                    own_state[name.split("module.")[-1]] = param
-                else:
-                    print(name, " not loaded")
-                    continue
-            else:
-                own_state[name] = param
-        return model
+def apply_pruning(model,image_size, amount=0.2):
+    
+    # Convolutional layers are the ones more suitable for pruning
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
+            prune.l1_unstructured(module, name='weight',amount=amount)  # Prune the weights
+
+    #compute_model_stats(model, image_size)
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) or isinstance(module, torch.nn.ConvTranspose2d):
+            prune.remove(module, 'weight')
+    
+    return model
    
 def main(args):
 
@@ -68,65 +69,129 @@ def main(args):
     print ("Loading model: " + modelpath)
     print ("Loading weights: " + weightspath)
 
-    
-    model = ERFNetQ(NUM_CLASSES)
-    
+    if args.quantize:
+        model = ERFNetQ(NUM_CLASSES)
+    else: 
+        model = ERFNet(NUM_CLASSES)
+
+    #model = torch.nn.DataParallel(model)
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
 
-    # Load pretrained model
+    def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
+        own_state = model.state_dict()
+        for name, param in state_dict.items():
+            if name not in own_state:
+                if name.startswith("module."):
+                    own_state[name.split("module.")[-1]].copy_(param)
+                else:
+                    print(name, " not loaded")
+                    continue
+            else:
+                own_state[name].copy_(param)
+        return model
 
-    state_dict = torch.load(weightspath, weights_only=False, map_location=lambda storage, loc: storage)
-
+    model = load_my_state_dict(model, torch.load(weightspath, weights_only=True, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
+
+    if args.temp != None:
+        input_transform = transforms.Compose([
+            transforms.Resize((128, 512)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        target_transform = transforms.Compose([
+            transforms.Resize((128, 512)),
+            transforms.ToTensor(),
+        ])
+        valid_loader = DataLoader(cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+
+        model = ModelWithTemperature(model, args.temp)
+        model.set_temperature(valid_loader)
 
     if(not os.path.exists(args.datadir)):
         print ("Error: datadir could not be loaded")
 
+
     full_dataset = cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset)
 
-    loader = DataLoader(full_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    if args.quantize:
+        
+        calib_dataset = cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset="test")
+        calib_loader = DataLoader(calib_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+        loader = DataLoader(full_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    else:
+        # fallback: no split needed
+        loader = DataLoader(full_dataset, num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+
+    image, _, _, _ = next(iter(loader))
+    image_size = image.shape # (H, W)
+    
+    # Pruning the model 
+
+    pruning_amount = 0.2
+    model = apply_pruning(model,image_size, amount=pruning_amount)
+
+    model.eval()
 
     iouEvalVal = iouEval(NUM_CLASSES)
 
     start = time.time()
 
-    if (torch.cuda.is_available() and not args.cpu):
-        model = model.cuda()
+    if args.quantize:
 
-    # QUANTIZATION of the model
+        if (torch.cuda.is_available() and not args.cpu):
+          model = model.cuda()
 
-    # Create qcofing for the quantization
-    qconfig = torch.quantization.get_default_qconfig('x86')
+        print("\n\t\tComputing initial model stats...")
+        compute_model_stats(model, image_size)
 
-    qconfig = qconfig._replace(
-        activation=HistogramObserver.with_args(dtype=torch.quint8),
-        weight=MinMaxObserver.with_args(dtype=torch.qint8)
-    )
+        # QUANTIZATION of the model
 
-    # Exclude from the quantization not supported layers
-    model.qconfig = qconfig
-    
-    for name, layer in model.named_modules():
-        if isinstance(layer, torch.nn.ConvTranspose2d):
-            layer.qconfig = None
-        if name == "encoder.output_conv":
-            layer.qconfig = None
+        # Create qcofing for the quantization
+        qconfig = torch.quantization.get_default_qconfig('x86')
 
-    # Prepare for quantization
-    model = torch.quantization.prepare(model, inplace=False)
+        qconfig = qconfig._replace(
+            activation=HistogramObserver.with_args(dtype=torch.quint8),
+            weight=MinMaxObserver.with_args(dtype=torch.qint8)
+        )
+
+        # Exclude from the quantization not supported layers
+        model.qconfig = qconfig
         
-    #Convert to quantized model
-    if (torch.cuda.is_available() and not args.cpu):
-        model.cpu()
-    
-    model = torch.quantization.convert(model, inplace=False) 
-    # Check new stats of the model
-    
-    model = load_my_state_dict(model, state_dict )
+        for name, layer in model.named_modules():
+            if isinstance(layer, torch.nn.ConvTranspose2d):
+                layer.qconfig = None
+            if name == "encoder.output_conv":
+                layer.qconfig = None
 
-    model.eval()
+        # Prepare for quantization
+        model = torch.quantization.prepare(model, inplace=False)
+        
+        # Calibration
+        for step, (images, labels, filename, filenameGt) in enumerate(tqdm(calib_loader)):
+            if (torch.cuda.is_available() and not args.cpu):
+              images = images.cuda()
+              labels = labels.cuda()
 
+            inputs = Variable(images)
+            with torch.no_grad():
+                outputs = model(inputs)
+
+            if step >= 500:
+              break
+            
+        #Convert to quantized model
+        if (torch.cuda.is_available() and not args.cpu):
+            model.cpu()
+      
+        model = torch.quantization.convert(model, inplace=False) 
+        # Check new stats of the model
+        print("\n\t\tComputing model stats after quantization...")
+        #compute_model_stats(model, image_size)
+
+    torch.save(model.state_dict(),"/content/drive/MyDrive/erfnet_quantized.pth")
     for step, (images, labels, filename, filenameGt) in enumerate(loader):
         if (not args.cpu):
             images = images.cuda()
@@ -185,12 +250,14 @@ if __name__ == '__main__':
     parser.add_argument('--state')
 
     parser.add_argument('--loadDir',default="trained_models/")
-    parser.add_argument('--loadWeights', default="erfnet_quantized.pth")
+    parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
-    parser.add_argument('--subset', default="test") 
+    parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
     parser.add_argument('--num-workers', type=int, default=1)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
-    
+    parser.add_argument('--temp', type=float, default=None)
+    parser.add_argument('--quantize', action='store_true')
+
     main(parser.parse_args())
