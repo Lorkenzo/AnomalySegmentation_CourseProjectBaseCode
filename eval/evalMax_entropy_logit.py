@@ -59,9 +59,9 @@ def load_model(args):
 
 
 def get_max_logit(output):
-    # Calcolo max-logit: Differenza tra la logit più alta e la seconda più alta
-    top2 = torch.topk(output.squeeze(0), 2, dim=0)
-    return top2.values[0, :, :] - top2.values[1, :, :]
+    # Calcolo max-logit
+    maxlog = -np.max(output.squeeze(0).data.cpu().numpy(), axis=0)
+    return maxlog
 
 
 def get_entropy(output):
@@ -82,7 +82,7 @@ def evaluate_ood(model, path, method='max_logit'):
         with torch.no_grad():
             output = model(images)
         if method == 'max_logit':
-            anomaly_scores = 1 - get_max_logit(output).cpu().numpy()
+            anomaly_scores = get_max_logit(output)
         elif method == 'max_entropy':
             anomaly_scores = get_entropy(output).cpu().numpy()
         else:
