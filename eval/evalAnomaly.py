@@ -211,8 +211,13 @@ def main():
         background_index = 19 # background is the last one
         result_void = result[:,background_index,:,:].unsqueeze(0)
 
-        anomaly_result_void = 1.0 - np.max(torch.nn.functional.softmax(result_void.squeeze(0),dim=0).cpu().numpy(), axis=0)  
-        anomaly_result_full = 1.0 - np.max(torch.nn.functional.softmax(result.squeeze(0),dim=0).cpu().numpy(), axis=0)  
+        if args.void:
+            anomaly_result_void = - np.max(result_void.squeeze(0).data.cpu().numpy(), axis=0)  
+            anomaly_result_full = - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)  
+        else:
+            anomaly_result_void = 1.0 - np.max(torch.nn.functional.softmax(result_void.squeeze(0),dim=0).cpu().numpy(), axis=0)  
+            anomaly_result_full = 1.0 - np.max(torch.nn.functional.softmax(result.squeeze(0),dim=0).cpu().numpy(), axis=0)  
+
         
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:

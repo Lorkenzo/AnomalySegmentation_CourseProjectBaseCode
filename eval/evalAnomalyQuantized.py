@@ -27,7 +27,7 @@ from models.erfnetQ import ERFNetQ,DownsamplerBlock
 from models.enet import ENet
 from models.bisenet import BiSeNetV2
 
-from evalAnomaly import plot_anomaly_map
+from matplotlib import pyplot as plt
 seed = 42
 
 # general reproducibility
@@ -175,8 +175,9 @@ def main():
         background_index = 19 # background is the last one
         result_void = result[:,background_index,:,:].unsqueeze(0)
 
-        anomaly_result_void = 1.0 - np.max(result_void.squeeze(0).data.cpu().numpy(), axis=0)  
-        anomaly_result_full = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)  
+        #Max-logit
+        anomaly_result_void = - np.max(result_void.squeeze(0).data.cpu().numpy(), axis=0)  
+        anomaly_result_full = - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)  
 
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:
@@ -210,11 +211,7 @@ def main():
             if args.void:
                 anomaly_score_list.append(anomaly_result_void)
             else:
-                anomaly_score_list.append(anomaly_result_full)
-
-        # Plot comparison between void and full classifier
-        if i == 1:
-            plot_anomaly_map(path,pathGT,anomaly_result_void,anomaly_result_full)  
+                anomaly_score_list.append(anomaly_result_full) 
 
         del result, anomaly_result_full,anomaly_result_void, ood_gts, mask
         torch.cuda.empty_cache()
