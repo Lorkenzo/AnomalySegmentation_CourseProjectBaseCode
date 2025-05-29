@@ -35,12 +35,9 @@ NUM_CLASSES = 20
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-def transform_label(label):
-        return torch.squeeze(label, 0).long()   
-
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
+from PIL import Image 
 
 def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map_full):
     """
@@ -95,6 +92,10 @@ def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map
 
     plt.tight_layout()
     plt.show()
+
+
+def transform_label_temp(label):
+    return torch.squeeze(label, 0).long()  
      
 def main():
     parser = ArgumentParser()
@@ -173,8 +174,8 @@ def main():
 
         target_transform = transforms.Compose([
         transforms.Resize((512, 1024)), 
-        transforms.ToTensor(),  
-        transform_label              
+        transforms.ToTensor(), 
+        transform_label_temp
         ])
         
         valid_loader = DataLoader(TestDataset(args.input[0].split("images")[0],input_transform,target_transform),
