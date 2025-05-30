@@ -21,9 +21,61 @@ np.random.seed(seed)
 torch.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
+from matplotlib import pyplot as plt
 
 NUM_CLASSES = 20
 
+def plot_anomaly_map(image_path, label_path, msp, entropy, logit):
+    """
+    image_path: percorso dell'immagine originale
+    anomaly_map: numpy array 2D con punteggi di anomalia (valori tra 0 e 1)
+    """
+    # Carica immagine originale
+    image = Image.open(image_path).convert('RGB')
+    image = np.array(image)
+
+    overlay = np.zeros_like(image, dtype=np.uint8)
+    overlay[label_path == 255] = [255, 255, 255]
+    overlay[label_path == 1] = [255, 0, 0]
+
+    percentile = 90  # mostra il top 10% score più alti
+    threshold1 = np.percentile(msp, percentile)
+    threshold2 = np.percentile(entropy, percentile)
+    threshold3 = np.percentile(logit, percentile)
+
+    plt.figure(figsize=(15,5))
+
+    # Immagine originale
+    plt.subplot(1, 5, 1)
+    plt.imshow(image)
+    plt.title("Input Image")
+    plt.axis('off')
+
+    plt.subplot(1, 5, 2)
+    plt.imshow(overlay)
+    plt.title("Anomaly Label")
+    plt.axis('off')
+
+    plt.subplot(1, 5, 3)
+    
+    plt.imshow(msp>threshold1, cmap="viridis")
+    plt.title("MSP score")
+    plt.axis('off')
+
+    plt.subplot(1, 5, 4)
+    
+    plt.imshow(entropy>threshold2, cmap="viridis")
+    plt.title("Max-entropy score")
+    plt.axis('off')
+
+    plt.subplot(1, 5, 5)
+    
+    plt.imshow(logit>threshold3, cmap="viridis")
+    plt.title("Max-logit score")
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
 
 def transform_label(label):
     return torch.squeeze(label, 0).long()
@@ -81,12 +133,12 @@ def evaluate_ood(model, path, method='max_logit'):
         images = images.permute(0,3,1,2)
         with torch.no_grad():
             output = model(images)
-        if method == 'max_logit':
-            anomaly_scores = get_max_logit(output)
-        elif method == 'max_entropy':
-            anomaly_scores = get_entropy(output).cpu().numpy()
-        else:
-            raise ValueError("Invalid method. Choose 'max_logit' or 'max_entropy'.")
+        
+        anomaly_scores_maxlogit = get_max_logit(output)
+    
+        anomaly_scores_maxentropy = get_entropy(output).cpu().numpy()
+
+        anomaly_scores_msp = 1.0 - np.max(torch.nn.functional.softmax(output.squeeze(0),dim=0).cpu().numpy(), axis=0)  
 
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:
@@ -115,8 +167,14 @@ def evaluate_ood(model, path, method='max_logit'):
             continue
         else:
             ood_gts_list.append(ood_gts)
+            if method == "max_logit":
+                anomaly_scores = anomaly_scores_maxlogit
+            elif method == "max_entropy":
+                anomaly_scores = anomaly_scores_maxentropy
             anomaly_score_list.append(anomaly_scores)
 
+        if "23." in path:
+            plot_anomaly_map(path,ood_gts,anomaly_scores_msp,anomaly_scores_maxentropy,anomaly_scores_maxlogit)
         del output, anomaly_scores, ood_gts
         torch.cuda.empty_cache()
 

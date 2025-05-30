@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image 
 
-def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map_full):
+def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map_void, anomaly_map_full):
     """
     image_path: percorso dell'immagine originale
     anomaly_map: numpy array 2D con punteggi di anomalia (valori tra 0 e 1)
@@ -57,12 +57,14 @@ def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map
                 image = transform_label(image)
 
     image = np.array(image)
-   
-    anomaly_map_resized = anomaly_map
 
     overlay = np.zeros_like(image, dtype=np.uint8)
     overlay[label_path == 255] = [255, 255, 255]
     overlay[label_path == 1] = [255, 0, 0]
+
+    percentile = 90  # mostra il top 10% score più alti
+    threshold1 = np.percentile(anomaly_map_full, percentile)
+    threshold2 = np.percentile(anomaly_map_void, percentile)
 
     plt.figure(figsize=(15,5))
     
@@ -80,13 +82,12 @@ def plot_anomaly_map(modelpath, image_path, label_path, anomaly_map, anomaly_map
 
     # Anomaly map (colormap heat)
     plt.subplot(1, 4, 3)
-    plt.imshow(anomaly_map_full, cmap="gray")
+    plt.imshow(anomaly_map_full>threshold1, cmap="viridis")
     plt.title("Anomaly Map")
     plt.axis('off')
 
     plt.subplot(1, 4, 4)
-    
-    plt.imshow(anomaly_map_resized, cmap="gray")
+    plt.imshow(anomaly_map_void>threshold2, cmap="viridis")
     plt.title("Anomaly Map Void")
     plt.axis('off')
 
