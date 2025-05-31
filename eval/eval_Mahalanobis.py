@@ -151,7 +151,7 @@ def compute_mahalanobis_confidence(x, model, feature_extractor, class_means, inv
             for c in mu_l:
                 # Calculate Mahalanobis distance for each feature vector to the class mean
                 dist_to_class = np.array([mahalanobis_distance(f, mu_l[c], inv_cov_l) for f in flattened_feat_map])
-                distances[c] = np.mean(dist_to_class) # Or perhaps min/max depending on your anomaly definition
+                distances[c] = np.mean(dist_to_class) 
 
             if distances:
                 closest_class = min(distances, key=distances.get)
@@ -188,9 +188,8 @@ def main(args):
     loader = DataLoader(cityscapes(args.datadir, input_transform, target_transform, subset=args.subset),
                         num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
 
-    # ********************** CORRECTION 1: Choose the layer **********************
+
     selected_layer_name = 'module.decoder.output_conv'
-    # ****************************************************************************
 
     feature_extractor = get_feature_extractor(model, [selected_layer_name])
 
@@ -206,16 +205,16 @@ def main(args):
         feats = feature_extractor(images)
         for layer_name, feat in feats.items():
             if layer_name == selected_layer_name:
-                # ********************** CORRECTION 2: Reshape features (without permute) **********************
+                
                 feat_shape = feat.shape
                 if len(feat_shape) == 4:
                     batch_size, num_channels, height, width = feat_shape
                     reshaped_feat = feat.reshape(batch_size, num_channels, -1).transpose(0, 2, 1).reshape(-1, num_channels)
                 else:
-                    # Assuming shape is (C, H, W) - reshape to (H*W, C)
+                    
                     num_channels, height, width = feat_shape
                     reshaped_feat = feat.reshape(num_channels, -1).transpose(1, 0)
-                # ****************************************************************************
+
                 flattened_labels = labels.cpu().numpy().reshape(-1)
 
                 all_features.append(reshaped_feat)

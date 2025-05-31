@@ -79,9 +79,6 @@ def main(args):
     if (not args.cpu):
         model = model.cuda()
 
-    #model.load_state_dict(torch.load(args.state))
-    #model.load_state_dict(torch.load(weightspath)) #not working if missing key
-
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
         own_state = model.state_dict()
         for name, param in state_dict.items():

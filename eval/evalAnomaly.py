@@ -183,7 +183,7 @@ def main():
             num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
     
         model = ModelWithTemperature(model,args.temp)
-        model.set_temperature(valid_loader)
+        model.set_temperature(valid_loader,anomaly=True)
 
     model.eval()
 
@@ -208,7 +208,7 @@ def main():
             else:
                 result = model(images)
         
-        #take only background as anomaly
+        #take only background as anomaly for void classifier
         background_index = 19 # background is the last one
         result_void = result[:,background_index,:,:].unsqueeze(0)
 

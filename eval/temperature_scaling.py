@@ -30,8 +30,7 @@ class ModelWithTemperature(nn.Module):
         temperature = self.temperature.view(1, 1, 1, 1)
         return logits / temperature
 
-    # This function probably should live outside of this class, but whatever
-    def set_temperature(self, valid_loader):
+    def set_temperature(self, valid_loader, anomaly=False):
         """
         Tune the tempearature of the model (using the validation set).
         We're going to set it to optimize NLL.
@@ -47,13 +46,26 @@ class ModelWithTemperature(nn.Module):
         logits_list = []
         labels_list = []
         with torch.no_grad():
-            for input, label, _, _ in valid_loader:
-                input = input.to(device)
-                logits = self.model(input)
-                logits_list.append(logits)
-                labels_list.append(label)
-            logits = torch.cat(logits_list).to(device)
-            labels = torch.cat(labels_list).to(device)
+            if anomaly:
+
+                for input, label in valid_loader:
+                    input = input.to(device)
+                    logits = self.model(input)
+                    logits_list.append(logits)
+                    labels_list.append(label)
+                logits = torch.cat(logits_list).to(device)
+                labels = torch.cat(labels_list).to(device)
+            
+            else:
+                
+                for input, label, _, _ in valid_loader:
+                    input = input.to(device)
+                    logits = self.model(input)
+                    logits_list.append(logits)
+                    labels_list.append(label)
+                logits = torch.cat(logits_list).to(device)
+                labels = torch.cat(labels_list).to(device)
+
 
         # Calculate NLL and ECE before temperature scaling
         before_temperature_nll = nll_criterion(logits, labels).item()
